@@ -11,11 +11,13 @@ from typing import Any, Dict, List, Optional, Tuple, Literal
 
 import aiohttp
 import discord
+from yarl import URL
 from redbot.core import commands, Config
 
 log = logging.getLogger("red.vrchat")
 
 VRCHAT_API_BASE = "https://api.vrchat.cloud/api/1"
+VRCHAT_API_URL = URL(VRCHAT_API_BASE)
 
 USER_ID_RE = re.compile(r"^usr_[0-9a-fA-F-]{36}$")
 WORLD_ID_RE = re.compile(r"^wrld_[0-9a-fA-F-]{36}$")
@@ -203,14 +205,17 @@ class VRChatAPI:
                 headers={"User-Agent": self.user_agent, "Accept": "application/json"},
             )
 
+            # FIX: aiohttp expects yarl.URL here (not a raw string)
             saved_auth = await self.config.auth_cookie()
             if saved_auth:
-                jar.update_cookies({"auth": saved_auth}, response_url=VRCHAT_API_BASE)
+                jar.update_cookies({"auth": saved_auth}, response_url=VRCHAT_API_URL)
+
         return self._session
 
     async def _save_auth_cookie(self):
         sess = await self._get_session()
-        cookies = sess.cookie_jar.filter_cookies(VRCHAT_API_BASE)
+        # FIX: also use yarl.URL here
+        cookies = sess.cookie_jar.filter_cookies(VRCHAT_API_URL)
         auth = cookies.get("auth")
         if auth and auth.value:
             await self.config.auth_cookie.set(auth.value)
@@ -250,7 +255,7 @@ class VRChatAPI:
         async with sess.get(url, headers={"Authorization": f"Basic {token}"}) as resp:
             data = await self._read_json_or_text(resp)
 
-            # Save cookie even if 2FA is required (VRChat verify endpoints need it)
+            # Save cookie even if 2FA is required (verify endpoints need it)
             await self._save_auth_cookie()
 
             twofa, methods = _looks_like_2fa_required(resp.status, data)
@@ -496,7 +501,7 @@ class LinkVRChatModal(discord.ui.Modal, title="Link VRChat Account"):
 
 
 # -----------------------------
-# World-only button: Show Author Profile
+# World-only: Show Author Profile
 # -----------------------------
 class WorldAuthorView(discord.ui.View):
     def __init__(self, cog: "VRChatCog", author_id: int, world_payload: Dict[str, Any], timeout: int = 180):
@@ -540,15 +545,14 @@ class WorldAuthorView(discord.ui.View):
                 ephemeral=True,
             )
 
-        # Just show the author embed (no extra buttons)
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
 # -----------------------------
 # Search UI (Dropdown + Prev/Next + Back)
-# - No "Pin/View detail" button
-# - World detail only: Show Author Profile
+# - No View Detail / Pin button
 # - No Close button
+# - World detail only: Show Author Profile button
 # -----------------------------
 class SearchResultsView(discord.ui.View):
     def __init__(
@@ -606,7 +610,7 @@ class SearchResultsView(discord.ui.View):
         self.next_button.disabled = (self.mode != "list") or (self.page >= self._max_page())
         self.back_button.disabled = (self.mode != "detail")
 
-        # author button only for world detail
+        # world author button only on world detail
         if self.mode == "detail" and self.kind == "world" and isinstance(self.current_detail_payload, dict):
             aid = str(self.current_detail_payload.get("authorId") or "").strip()
             self.author_button.disabled = not USER_ID_RE.match(aid)
@@ -717,8 +721,6 @@ class SearchResultsView(discord.ui.View):
             )
 
         view = WorldAuthorView(self.cog, self.author_id, self.current_detail_payload)
-        # Trigger the author fetch by clicking the button on the view (same UX),
-        # but easiest is: send a small message with this one button.
         await interaction.response.send_message(
             "Press the button to fetch the world author's profile.",
             ephemeral=True,
@@ -749,21 +751,21 @@ class VRChatCog(commands.Cog):
         self.config.register_guild(
             watch_channel_id=None,
             watch_user_ids=[],
-            watch_last={},  # user_id -> {state,status,location,displayName,lastSeen}
+            watch_last={},
         )
 
-        ua = f"Red-VRChatCog/3.2 (discord.py; bot_id={getattr(getattr(bot,'user',None),'id','unknown')})"
+        ua = f"Red-VRChatCog/3.3 (discord.py; bot_id={getattr(getattr(bot,'user',None),'id','unknown')})"
         self.api = VRChatAPI(self.config, user_agent=ua)
 
         self._world_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
-        self._world_cache_ttl_sec = 600  # 10 min
+        self._world_cache_ttl_sec = 600
 
-        self._watch_task: Optional[asyncio.Task] = self.bot.loop.create_task(self._watch_loop())
+        self._watch_task: Optional[asyncio.Task] = asyncio.create_task(self._watch_loop())
 
     def cog_unload(self):
         if self._watch_task and not self._watch_task.done():
             self._watch_task.cancel()
-        self.bot.loop.create_task(self.api.close())
+        asyncio.create_task(self.api.close())
 
     # -----------------------------
     # World cache
@@ -886,11 +888,9 @@ class VRChatCog(commands.Cog):
         full_profile: Dict[str, Any],
     ) -> discord.Embed:
         name = new.get("displayName") or user_id
-        old_loc = str(old.get("location") or "")
         new_loc = str(new.get("location") or "")
 
-        _, new_inst, _ = _parse_location(new_loc)
-        new_wid, _, _ = _parse_location(new_loc)
+        new_wid, new_inst, kind = _parse_location(new_loc)
 
         em = discord.Embed(
             title=f"🔔 VRChat status changed • {name}",
@@ -912,7 +912,7 @@ class VRChatCog(commands.Cog):
             value=_clip(
                 f"{_status_emoji(str(old.get('state') or ''))} state: `{old.get('state','—')}`\n"
                 f"status: `{old.get('status','—')}`\n"
-                f"location: `{_clip(old_loc, 180)}`",
+                f"location: `{_clip(str(old.get('location') or ''), 180)}`",
                 900,
             ),
             inline=True,
@@ -922,7 +922,7 @@ class VRChatCog(commands.Cog):
             value=_clip(
                 f"{_status_emoji(str(new.get('state') or ''))} state: `{new.get('state','—')}`\n"
                 f"status: `{new.get('status','—')}`\n"
-                f"location: `{_clip(new_loc, 180)}`",
+                f"location: `{_clip(str(new.get('location') or ''), 180)}`",
                 900,
             ),
             inline=True,
@@ -1176,7 +1176,7 @@ class VRChatCog(commands.Cog):
         return em
 
     # -----------------------------
-    # GROUP + SUBCOMMANDS (Requested #1 and #2)
+    # GROUP + SUBCOMMANDS
     # -----------------------------
     @commands.group(name="vrc", invoke_without_command=True)
     async def vrc(self, ctx: commands.Context):
@@ -1191,11 +1191,11 @@ class VRChatCog(commands.Cog):
             "• `vrc help`\n"
             "• `vrc uid <usr_...>` — fetch user by ID\n"
             "• `vrc user <display name>` — search users + dropdown details\n"
-            "• `vrc wid <wrld_...>` — fetch world by ID (world-only: Show Author Profile button)\n"
-            "• `vrc world <world name>` — search worlds + dropdown details (world-only: Show Author Profile button)\n"
-            "• `vrc link` — link Discord ↔ VRChat ID (modal)\n"
+            "• `vrc wid <wrld_...>` — fetch world by ID (world-only: Show Author Profile)\n"
+            "• `vrc world <world name>` — search worlds + dropdown details (world-only: Show Author Profile)\n"
+            "• `vrc link` — link Discord ↔ VRChat ID (button + modal)\n"
             "• `vrc me` — show your linked profile\n"
-            "• `vrc profile @member` — show a member's linked profile\n\n"
+            "• `vrc profile @member` — show member linked profile\n\n"
             "**Owner**\n"
             "• `vrc setcreds <username> <password>`\n"
             "• `vrc clearcookie`\n"
@@ -1203,7 +1203,7 @@ class VRChatCog(commands.Cog):
             "• `vrc 2fa` — open 2FA verification UI\n\n"
             "**Watchlist (guild admin/manage_guild)**\n"
             "• `vrc watchchannel [#channel]`\n"
-            "• `vrc watch [usr_... | @member]` (default = yourself if linked)\n"
+            "• `vrc watch [usr_... | @member]` (default: yourself if linked)\n"
             "• `vrc unwatch [usr_... | @member]`\n"
             "• `vrc watchlist`\n"
             "• `vrc watchclear`\n"
@@ -1429,7 +1429,6 @@ class VRChatCog(commands.Cog):
         ids.append(vid)
         await gconf.watch_user_ids.set(ids)
 
-        # seed snapshot
         try:
             u = await self.api.get_user_by_id(vid)
             last = await gconf.watch_last()

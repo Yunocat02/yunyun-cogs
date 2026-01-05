@@ -1,7 +1,7 @@
 {
   "name": "vrchat",
   "author": ["yunyun"],
-  "short": "VRChat search/profile cog (dropdown details, world author button, watchlist, 2FA UI)",
+  "short": "VRChat command group (dropdown details, world author button, watchlist, 2FA UI)",
   "description": "VRChat command group for Red-DiscordBot. Search users/worlds with a dropdown to open details, fetch by ID, link Discord↔VRChat ID, guild watchlist notifications, and interactive 2FA verification (TOTP/Email OTP).",
   "install_msg": "Loaded! Owner: set credentials with `vrc setcreds <username> <password>`. If VRChat requires 2FA, run `vrc 2fa`. For watchlist: set `vrc watchchannel` then add watchers via `vrc watch`.",
   "requirements": [],

@@ -3,20 +3,20 @@
 A VRChat utility cog for Red-DiscordBot:
 - Fetch user/world details by ID
 - Search users/worlds with a dropdown to open details
-- Optional world-only "Show Author Profile"
+- World-only “Show Author Profile”
 - Guild watchlist notifications (state/status/location changes)
-- Supports VRChat 2FA (TOTP / Email OTP) via an interactive button + modal
+- Supports VRChat 2FA (TOTP / Email OTP) via interactive button + modal
 
 ---
 
 ## Commands
 
 ### Core
-- `vrc help` — show this help
+- `vrc help` — show help
 - `vrc uid <usr_...>` — fetch user by VRChat userId
 - `vrc user <display name>` — search users (up to 60) + dropdown details
-- `vrc wid <wrld_...>` — fetch world by worldId *(includes world-only “Show Author Profile”)*
-- `vrc world <world name>` — search worlds (up to 60) + dropdown details *(includes world-only “Show Author Profile”)*
+- `vrc wid <wrld_...>` — fetch world by worldId (includes world-only “Show Author Profile”)
+- `vrc world <world name>` — search worlds (up to 60) + dropdown details (includes world-only “Show Author Profile”)
 - `vrc link` — link Discord ↔ VRChat userId (button + modal)
 - `vrc me` — show your linked VRChat profile
 - `vrc profile @member` — show a member’s linked VRChat profile
