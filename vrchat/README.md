@@ -1,35 +1,44 @@
 # VRChat Cog for Red-DiscordBot
 
+A VRChat utility cog for Red-DiscordBot:
+- Fetch user/world details by ID
+- Search users/worlds with a dropdown to open details
+- Optional world-only "Show Author Profile"
+- Guild watchlist notifications (state/status/location changes)
+- Supports VRChat 2FA (TOTP / Email OTP) via an interactive button + modal
+
+---
+
 ## Commands
-- vrc.help
-- vrc.uid <usr_...>
-- vrc.user <display name>  (search up to 60 + dropdown to open details)
-- vrc.wid <wrld_...>
-- vrc.world <world name>   (search up to 60 + dropdown to open details)
-- vrc.link                 (button + modal to link your Discord -> VRChat userId)
-- vrc.me
-- vrc.profile @member
-- vrc.2fa                  (Owner-only: open interactive 2FA verification UI if required)
 
-### Watchlist (guild)
-- vrc.watchchannel [#channel]     (set notify channel; default = current channel)
-- vrc.watch [usr_... | @member]   (add to watchlist; default = yourself if linked)
-- vrc.unwatch [usr_... | @member] (remove)
-- vrc.watchlist                   (show list)
-- vrc.watchclear                  (clear list)
+### Core
+- `vrc help` — show this help
+- `vrc uid <usr_...>` — fetch user by VRChat userId
+- `vrc user <display name>` — search users (up to 60) + dropdown details
+- `vrc wid <wrld_...>` — fetch world by worldId *(includes world-only “Show Author Profile”)*
+- `vrc world <world name>` — search worlds (up to 60) + dropdown details *(includes world-only “Show Author Profile”)*
+- `vrc link` — link Discord ↔ VRChat userId (button + modal)
+- `vrc me` — show your linked VRChat profile
+- `vrc profile @member` — show a member’s linked VRChat profile
 
-## Setup
-1) Owner must set VRChat creds:
-- `vrc.setcreds <username> <password>`
+### Owner-only
+- `vrc setcreds <username> <password>` — set VRChat login credentials
+- `vrc clearcookie` — clear VRChat auth cookie
+- `vrc 2fa` — open the 2FA verification UI (buttons + modal)
+- `vrc watchinterval <seconds>` — set watch interval (min 20s)
 
-2) If the VRChat account requires 2FA:
-- Use `vrc.2fa` (Owner only), or
-- Trigger any command (e.g., `vrc.user neko`) and the bot will show a button to enter the 2FA code.
+### Watchlist (guild admin / manage_guild)
+- `vrc watchchannel [#channel]` — set notification channel (default: current channel)
+- `vrc watch [usr_... | @member]` — add to watchlist (default: yourself if linked)
+- `vrc unwatch [usr_... | @member]` — remove from watchlist
+- `vrc watchlist` — show watchlist
+- `vrc watchclear` — clear watchlist
 
-Supported 2FA methods:
-- TOTP (Authenticator App code)
-- Email OTP (code sent to your email)
+---
 
-## Notes
-- Credentials are stored in Red config (plaintext). Use a dedicated bot account.
-- The 2FA UI is Owner-only to reduce risk.
+## Notes & Security
+
+- The owner must run `vrc setcreds <username> <password>` first.
+- Credentials are stored in Red config (plaintext). Use a dedicated VRChat bot account.
+- If VRChat returns **HTTP 401: Requires Two-Factor Authentication**, run `vrc 2fa`
+  (or click the provided 2FA button) and enter the code (TOTP or Email OTP).

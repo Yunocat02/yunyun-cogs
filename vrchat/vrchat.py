@@ -83,9 +83,9 @@ def _world_launch_url(world_id: str, instance_id: Optional[str] = None) -> str:
 
 def _parse_location(location: Optional[str]) -> Tuple[Optional[str], Optional[str], str]:
     """
-    VRChat 'location' can be:
-      - "", "offline", "private", "traveling", "traveling:traveling"
-      - or 'wrld_...:instanceId'
+    VRChat 'location' examples:
+      - "", "offline", "private", "traveling"
+      - "wrld_...:instanceId"
     Return: (world_id, instance_id, kind)
     kind: "world" | "offline" | "private" | "traveling" | "unknown"
     """
@@ -117,19 +117,16 @@ def _parse_location(location: Optional[str]) -> Tuple[Optional[str], Optional[st
 def _looks_like_2fa_required(status: int, data: Any) -> Tuple[bool, List[str]]:
     """
     Detect 2FA requirement and return possible 2FA methods.
-    VRChat commonly returns:
+    Common shapes:
       - 200 with {"requiresTwoFactorAuth":["totp","otp"]}
-      - or 401 with error message "Requires Two-Factor Authentication"
-    We'll normalize:
-      "totp" => authenticator app
-      "otp"  => email OTP (VRChat naming in some docs/clients)
+      - 401 with message "Requires Two-Factor Authentication"
     """
     methods: List[str] = []
     if isinstance(data, dict):
         r = data.get("requiresTwoFactorAuth")
         if isinstance(r, list):
             methods = [str(x).strip().lower() for x in r if str(x).strip()]
-    # Also detect by message
+
     msg = None
     if isinstance(data, dict):
         msg = (data.get("error") or {}).get("message") or data.get("message")
@@ -143,10 +140,8 @@ def _looks_like_2fa_required(status: int, data: Any) -> Tuple[bool, List[str]]:
     if methods:
         return True, methods
 
-    # Some implementations may yield 401 without structured payload
-    if status == 401 and msg_low:
-        if "two-factor" in msg_low or "2fa" in msg_low:
-            return True, methods or ["totp", "otp"]
+    if status == 401 and msg_low and ("two-factor" in msg_low or "2fa" in msg_low):
+        return True, methods or ["totp", "otp"]
 
     return False, []
 
@@ -161,7 +156,6 @@ def _normalize_2fa_methods(methods: List[str]) -> List[str]:
             out.append("emailotp")
         elif m in ("recovery", "recoverycode"):
             out.append("recovery")
-    # Keep unique, stable order
     uniq = []
     for x in out:
         if x not in uniq:
@@ -238,17 +232,12 @@ class VRChatAPI:
             return False
 
     async def _begin_login(self) -> Tuple[bool, List[str]]:
-        """
-        Attempt initial login using Basic auth.
-        Save the auth cookie if present.
-        Return (two_factor_required, methods)
-        """
         username = await self.config.vrchat_username()
         password = await self.config.vrchat_password()
         if not username or not password:
             raise VRChatError(
                 401,
-                "VRChat credentials not set. Owner must run: `vrc.setcreds <username> <password>`",
+                "VRChat credentials not set. Owner must run: `vrc setcreds <username> <password>`",
             )
 
         u = urllib.parse.quote(username, safe="")
@@ -261,8 +250,7 @@ class VRChatAPI:
         async with sess.get(url, headers={"Authorization": f"Basic {token}"}) as resp:
             data = await self._read_json_or_text(resp)
 
-            # Always try to save cookie if it was set.
-            # For 2FA flows, VRChat relies on this cookie for verify endpoints.
+            # Save cookie even if 2FA is required (VRChat verify endpoints need it)
             await self._save_auth_cookie()
 
             twofa, methods = _looks_like_2fa_required(resp.status, data)
@@ -272,13 +260,11 @@ class VRChatAPI:
                 return False, []
 
             if twofa:
-                # Persist pending 2FA state
                 await self.config.pending_2fa_required.set(True)
                 await self.config.pending_2fa_methods.set(methods or ["totp", "emailotp"])
                 await self.config.pending_2fa_at.set(int(time.time()))
                 return True, (methods or ["totp", "emailotp"])
 
-            # Otherwise it's a real login failure
             msg = None
             if isinstance(data, dict):
                 msg = (data.get("error") or {}).get("message") or data.get("message")
@@ -289,7 +275,6 @@ class VRChatAPI:
     async def login_if_needed(self):
         async with self._login_lock:
             if await self._has_valid_cookie():
-                # Clear pending flag if cookie already works
                 await self.config.pending_2fa_required.set(False)
                 await self.config.pending_2fa_methods.set([])
                 await self.config.pending_2fa_at.set(None)
@@ -300,10 +285,9 @@ class VRChatAPI:
                 raise VRChatError(
                     401,
                     f"Two-factor authentication required ({', '.join(methods) or 'unknown'}). "
-                    f"Owner must verify with `vrc.2fa` (or use the button).",
+                    f"Owner must verify with `vrc 2fa` (or use the button).",
                 )
 
-            # If begin_login returned not-twofa and status 200, cookie should be valid now.
             if not await self._has_valid_cookie():
                 raise VRChatError(401, "Login did not produce a valid session. Please try again.")
 
@@ -382,7 +366,6 @@ class VRChatAPI:
 
             return data
 
-    # ---- endpoints ----
     async def get_user_by_id(self, user_id: str) -> Dict[str, Any]:
         data = await self.request("GET", f"/users/{user_id}")
         return data if isinstance(data, dict) else {}
@@ -405,22 +388,20 @@ class VRChatAPI:
 # -----------------------------
 class TwoFAModal(discord.ui.Modal):
     def __init__(self, cog: "VRChatCog", method: Literal["totp", "emailotp"]):
-        title = "VRChat 2FA Verification"
-        super().__init__(title=title)
+        super().__init__(title="VRChat 2FA Verification")
         self.cog = cog
         self.method = method
 
         label = "Authenticator App Code (TOTP)" if method == "totp" else "Email OTP Code"
         self.code = discord.ui.TextInput(
             label=label,
-            placeholder="Enter the 6-digit code",
+            placeholder="Enter the code",
             required=True,
             max_length=12,
         )
         self.add_item(self.code)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Owner-only for safety
         is_owner = await self.cog.bot.is_owner(interaction.user)
         if not is_owner:
             return await interaction.response.send_message(
@@ -431,24 +412,16 @@ class TwoFAModal(discord.ui.Modal):
         code = str(self.code.value).strip()
         try:
             if self.method == "totp":
-                res = await self.cog.api.verify_2fa_totp(code)
+                await self.cog.api.verify_2fa_totp(code)
             else:
-                res = await self.cog.api.verify_2fa_emailotp(code)
+                await self.cog.api.verify_2fa_emailotp(code)
         except VRChatError as e:
             return await interaction.response.send_message(
                 f"2FA verification failed (HTTP {e.status}): {_clip(e.message, 300)}",
                 ephemeral=True,
             )
 
-        verified = None
-        if isinstance(res, dict):
-            verified = res.get("verified")
-
-        msg = "✅ 2FA verified. You can run VRChat commands now."
-        if verified is False:
-            msg = "⚠️ Verification response received, but 'verified' was false. Please try again."
-
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message("✅ 2FA verified. You can run VRChat commands now.", ephemeral=True)
 
 
 class TwoFAView(discord.ui.View):
@@ -458,12 +431,10 @@ class TwoFAView(discord.ui.View):
         self.author_id = author_id
         self.methods = methods
 
-        # Dynamically enable buttons based on required methods
         self.totp_button.disabled = "totp" not in methods
         self.email_button.disabled = "emailotp" not in methods
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Allow only the command invoker to click (and modal submit will also be owner-only)
         if interaction.user and interaction.user.id == self.author_id:
             return True
         await interaction.response.send_message(
@@ -480,38 +451,62 @@ class TwoFAView(discord.ui.View):
     async def email_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TwoFAModal(self.cog, "emailotp"))
 
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
-    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            if isinstance(child, (discord.ui.Button, discord.ui.Select)):
-                child.disabled = True
-        await interaction.response.edit_message(view=self)
-        self.stop()
+
+# -----------------------------
+# Modal: Link VRChat ID
+# -----------------------------
+class LinkVRChatModal(discord.ui.Modal, title="Link VRChat Account"):
+    vrchat_user_id = discord.ui.TextInput(
+        label="VRChat User ID",
+        placeholder="usr_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        required=True,
+        max_length=64,
+    )
+
+    def __init__(self, cog: "VRChatCog"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_id = str(self.vrchat_user_id.value).strip()
+        if not USER_ID_RE.match(user_id):
+            await interaction.response.send_message("Invalid format. Must be `usr_...` (UUID).", ephemeral=True)
+            return
+
+        try:
+            profile = await self.cog.api.get_user_by_id(user_id)
+        except VRChatError as e:
+            if e.status == 401 and "two-factor" in (e.message or "").lower():
+                methods = _normalize_2fa_methods(await self.cog.config.pending_2fa_methods() or ["totp", "emailotp"])
+                return await interaction.response.send_message(
+                    f"VRChat requires 2FA verification (HTTP {e.status}). Use the button below or run `vrc 2fa`.\n"
+                    f"Details: {_clip(e.message, 240)}",
+                    ephemeral=True,
+                    view=TwoFAView(self.cog, interaction.user.id, methods),
+                )
+            await interaction.response.send_message(
+                f"Request failed (HTTP {e.status}): {_clip(e.message, 300)}",
+                ephemeral=True,
+            )
+            return
+
+        await self.cog.config.user(interaction.user).vrchat_user_id.set(user_id)
+        embed = await self.cog._build_user_detail_embed(profile, title_prefix="✅ Linked")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # -----------------------------
-# Detail Actions View (for direct uid/wid)
-# - Pin Detail
-# - Show Author Profile (world only)
+# World-only button: Show Author Profile
 # -----------------------------
-class DetailActionsView(discord.ui.View):
-    def __init__(
-        self,
-        cog: "VRChatCog",
-        author_id: int,
-        kind: Literal["user", "world"],
-        embed: discord.Embed,
-        payload: Dict[str, Any],
-        timeout: int = 240,
-    ):
+class WorldAuthorView(discord.ui.View):
+    def __init__(self, cog: "VRChatCog", author_id: int, world_payload: Dict[str, Any], timeout: int = 180):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.author_id = author_id
-        self.kind = kind
-        self.current_embed = embed
-        self.current_payload = payload
+        self.world_payload = world_payload
 
-        self._sync()
+        aid = str(world_payload.get("authorId") or "").strip()
+        self.show_author.disabled = not USER_ID_RE.match(aid)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user and interaction.user.id == self.author_id:
@@ -522,63 +517,38 @@ class DetailActionsView(discord.ui.View):
         )
         return False
 
-    def _sync(self):
-        self.pin_button.disabled = (self.current_embed is None)
-        if self.kind == "world":
-            aid = str(self.current_payload.get("authorId") or "").strip()
-            self.author_button.disabled = not USER_ID_RE.match(aid)
-        else:
-            self.author_button.disabled = True
-
-    @discord.ui.button(label="📌 Pin Detail", style=discord.ButtonStyle.success)
-    async def pin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self._sync()
-        await interaction.response.send_message("✅ Posted the details as a new message.", ephemeral=True)
-        if interaction.channel:
-            await interaction.channel.send(embed=self.current_embed)
-
     @discord.ui.button(label="👤 Show Author Profile", style=discord.ButtonStyle.primary)
-    async def author_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self._sync()
-        if self.kind != "world":
-            return await interaction.response.send_message(
-                "This button is only available on World detail views.",
-                ephemeral=True,
-            )
-
-        author_id = str(self.current_payload.get("authorId") or "").strip()
-        if not USER_ID_RE.match(author_id):
-            return await interaction.response.send_message(
-                "authorId not found or invalid format.",
-                ephemeral=True,
-            )
+    async def show_author(self, interaction: discord.Interaction, button: discord.ui.Button):
+        aid = str(self.world_payload.get("authorId") or "").strip()
+        if not USER_ID_RE.match(aid):
+            return await interaction.response.send_message("authorId not found or invalid.", ephemeral=True)
 
         try:
-            u = await self.cog.api.get_user_by_id(author_id)
+            u = await self.cog.api.get_user_by_id(aid)
             embed = await self.cog._build_user_detail_embed(u, title_prefix="👤 Author")
         except VRChatError as e:
+            if e.status == 401 and "two-factor" in (e.message or "").lower():
+                methods = _normalize_2fa_methods(await self.cog.config.pending_2fa_methods() or ["totp", "emailotp"])
+                return await interaction.response.send_message(
+                    f"VRChat requires 2FA verification (HTTP {e.status}). Use the button below or run `vrc 2fa`.\n"
+                    f"Details: {_clip(e.message, 240)}",
+                    ephemeral=True,
+                    view=TwoFAView(self.cog, interaction.user.id, methods),
+                )
             return await interaction.response.send_message(
-                f"Failed to fetch author (HTTP {e.status}): {_clip(e.message, 200)}",
+                f"Failed to fetch author (HTTP {e.status}): {_clip(e.message, 240)}",
                 ephemeral=True,
             )
 
-        await interaction.response.send_message("✅ Posted the author profile as a new message.", ephemeral=True)
-        if interaction.channel:
-            await interaction.channel.send(embed=embed, view=DetailActionsView(self.cog, self.author_id, "user", embed, u))
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
-    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            if isinstance(child, (discord.ui.Button, discord.ui.Select)):
-                child.disabled = True
-        await interaction.response.edit_message(view=self)
-        self.stop()
+        # Just show the author embed (no extra buttons)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
 # -----------------------------
-# Search UI View (Pagination + Select + Detail Mode)
-# - Pin Detail
-# - Show Author Profile (world detail only)
+# Search UI (Dropdown + Prev/Next + Back)
+# - No "Pin/View detail" button
+# - World detail only: Show Author Profile
+# - No Close button
 # -----------------------------
 class SearchResultsView(discord.ui.View):
     def __init__(
@@ -601,9 +571,7 @@ class SearchResultsView(discord.ui.View):
         self.mode: Literal["list", "detail"] = "list"
         self._last_list_page = 0
 
-        # current detail cache for Pin / Author
         self.current_detail_payload: Optional[Dict[str, Any]] = None
-        self.current_detail_embed: Optional[discord.Embed] = None
 
         self.select_menu = discord.ui.Select(
             placeholder="Select an item to open details…",
@@ -615,7 +583,7 @@ class SearchResultsView(discord.ui.View):
         self.select_menu.callback = self._on_select
         self.add_item(self.select_menu)
 
-        self._sync_buttons_and_select()
+        self._sync()
 
     def _max_page(self) -> int:
         return max(0, (len(self.items) - 1) // self.per_page)
@@ -633,22 +601,21 @@ class SearchResultsView(discord.ui.View):
         )
         return False
 
-    def _sync_buttons_and_select(self):
+    def _sync(self):
         self.prev_button.disabled = (self.mode != "list") or (self.page <= 0)
         self.next_button.disabled = (self.mode != "list") or (self.page >= self._max_page())
         self.back_button.disabled = (self.mode != "detail")
-        self.pin_button.disabled = (self.mode != "detail") or (self.current_detail_embed is None)
 
-        # author button only in world-detail mode and authorId exists
-        if self.mode != "detail" or self.kind != "world" or not self.current_detail_payload:
-            self.author_button.disabled = True
-        else:
+        # author button only for world detail
+        if self.mode == "detail" and self.kind == "world" and isinstance(self.current_detail_payload, dict):
             aid = str(self.current_detail_payload.get("authorId") or "").strip()
             self.author_button.disabled = not USER_ID_RE.match(aid)
+        else:
+            self.author_button.disabled = True
 
         if self.mode != "list":
             self.select_menu.disabled = True
-            self.select_menu.options = [discord.SelectOption(label="(Press Back to return to the list)", value="noop")]
+            self.select_menu.options = [discord.SelectOption(label="(Press Back to return)", value="noop")]
             return
 
         self.select_menu.disabled = False
@@ -679,7 +646,7 @@ class SearchResultsView(discord.ui.View):
             return self.cog._render_user_search_page(self.items, self.page, self.per_page)
         return self.cog._render_world_search_page(self.items, self.page, self.per_page)
 
-    async def render_detail(self, item_id: str) -> Tuple[discord.Embed, Dict[str, Any]]:
+    async def render_detail_embed(self, item_id: str) -> Tuple[discord.Embed, Dict[str, Any]]:
         if self.kind == "user":
             u = await self.cog.api.get_user_by_id(item_id)
             return await self.cog._build_user_detail_embed(u), u
@@ -687,7 +654,7 @@ class SearchResultsView(discord.ui.View):
         return self.cog._build_world_detail_embed(w), w
 
     async def _edit(self, interaction: discord.Interaction, embed: discord.Embed):
-        self._sync_buttons_and_select()
+        self._sync()
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _on_select(self, interaction: discord.Interaction):
@@ -699,31 +666,29 @@ class SearchResultsView(discord.ui.View):
         self._last_list_page = self.page
 
         try:
-            embed, payload = await self.render_detail(item_id)
+            embed, payload = await self.render_detail_embed(item_id)
         except VRChatError as e:
             self.mode = "list"
             self.page = self._last_list_page
-            self.current_detail_embed = None
             self.current_detail_payload = None
-            self._sync_buttons_and_select()
+            self._sync()
 
-            # If 2FA is required, show the interactive UI
             if e.status == 401 and "two-factor" in (e.message or "").lower():
                 methods = _normalize_2fa_methods(await self.cog.config.pending_2fa_methods() or ["totp", "emailotp"])
                 return await interaction.response.send_message(
-                    f"VRChat requires 2FA verification (HTTP {e.status}). Use the button below or run `vrc.2fa`.\n"
+                    f"VRChat requires 2FA verification (HTTP {e.status}). Use the button below or run `vrc 2fa`.\n"
                     f"Details: {_clip(e.message, 240)}",
                     ephemeral=True,
                     view=TwoFAView(self.cog, self.author_id, methods),
                 )
 
             return await interaction.response.send_message(
-                f"Failed to fetch details (HTTP {e.status}): {_clip(e.message, 300)}",
+                f"Request failed (HTTP {e.status}): {_clip(e.message, 300)}",
                 ephemeral=True,
             )
 
-        self.current_detail_embed = embed
         self.current_detail_payload = payload
+        self._sync()
         await self._edit(interaction, embed)
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
@@ -740,94 +705,25 @@ class SearchResultsView(discord.ui.View):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.mode = "list"
         self.page = self._last_list_page
-        self.current_detail_embed = None
         self.current_detail_payload = None
         await self._edit(interaction, self.render_list_embed())
 
-    @discord.ui.button(label="📌 Pin Detail", style=discord.ButtonStyle.success, row=2)
-    async def pin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.current_detail_embed:
-            return await interaction.response.send_message("No detail is currently open.", ephemeral=True)
-        await interaction.response.send_message("✅ Posted the details as a new message.", ephemeral=True)
-        if interaction.channel:
-            await interaction.channel.send(embed=self.current_detail_embed)
-
     @discord.ui.button(label="👤 Show Author Profile", style=discord.ButtonStyle.primary, row=2)
     async def author_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.kind != "world" or not self.current_detail_payload:
+        if self.kind != "world" or not isinstance(self.current_detail_payload, dict):
             return await interaction.response.send_message(
                 "This button is only available on World detail views.",
                 ephemeral=True,
             )
 
-        author_id = str(self.current_detail_payload.get("authorId") or "").strip()
-        if not USER_ID_RE.match(author_id):
-            return await interaction.response.send_message("authorId not found or invalid format.", ephemeral=True)
-
-        try:
-            u = await self.cog.api.get_user_by_id(author_id)
-            embed = await self.cog._build_user_detail_embed(u, title_prefix="👤 Author")
-        except VRChatError as e:
-            return await interaction.response.send_message(
-                f"Failed to fetch author (HTTP {e.status}): {_clip(e.message, 200)}",
-                ephemeral=True,
-            )
-
-        await interaction.response.send_message("✅ Posted the author profile as a new message.", ephemeral=True)
-        if interaction.channel:
-            await interaction.channel.send(embed=embed, view=DetailActionsView(self.cog, self.author_id, "user", embed, u))
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=2)
-    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            if isinstance(child, (discord.ui.Button, discord.ui.Select)):
-                child.disabled = True
-        await interaction.response.edit_message(view=self)
-        self.stop()
-
-
-# -----------------------------
-# Modal: Link VRChat ID
-# -----------------------------
-class LinkVRChatModal(discord.ui.Modal, title="Link VRChat Account"):
-    vrchat_user_id = discord.ui.TextInput(
-        label="VRChat User ID",
-        placeholder="usr_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        required=True,
-        max_length=64,
-    )
-
-    def __init__(self, cog: "VRChatCog"):
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_id = str(self.vrchat_user_id.value).strip()
-        if not USER_ID_RE.match(user_id):
-            await interaction.response.send_message("Invalid format. Must be `usr_...` (UUID).", ephemeral=True)
-            return
-
-        try:
-            profile = await self.cog.api.get_user_by_id(user_id)
-        except VRChatError as e:
-            # 2FA shortcut UI
-            if e.status == 401 and "two-factor" in (e.message or "").lower():
-                methods = _normalize_2fa_methods(await self.cog.config.pending_2fa_methods() or ["totp", "emailotp"])
-                return await interaction.response.send_message(
-                    f"VRChat requires 2FA verification (HTTP {e.status}). Use the button below or run `vrc.2fa`.\n"
-                    f"Details: {_clip(e.message, 240)}",
-                    ephemeral=True,
-                    view=TwoFAView(self.cog, interaction.user.id, methods),
-                )
-            await interaction.response.send_message(
-                f"Failed to fetch data (HTTP {e.status}): {_clip(e.message, 300)}",
-                ephemeral=True,
-            )
-            return
-
-        await self.cog.config.user(interaction.user).vrchat_user_id.set(user_id)
-        embed = await self.cog._build_user_detail_embed(profile, title_prefix="✅ Linked")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = WorldAuthorView(self.cog, self.author_id, self.current_detail_payload)
+        # Trigger the author fetch by clicking the button on the view (same UX),
+        # but easiest is: send a small message with this one button.
+        await interaction.response.send_message(
+            "Press the button to fetch the world author's profile.",
+            ephemeral=True,
+            view=view,
+        )
 
 
 # -----------------------------
@@ -856,7 +752,7 @@ class VRChatCog(commands.Cog):
             watch_last={},  # user_id -> {state,status,location,displayName,lastSeen}
         )
 
-        ua = f"Red-VRChatCog/3.1 (discord.py; bot_id={getattr(getattr(bot,'user',None),'id','unknown')})"
+        ua = f"Red-VRChatCog/3.2 (discord.py; bot_id={getattr(getattr(bot,'user',None),'id','unknown')})"
         self.api = VRChatAPI(self.config, user_agent=ua)
 
         self._world_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
@@ -915,7 +811,6 @@ class VRChatCog(commands.Cog):
                 await asyncio.sleep(30)
 
     async def _watch_tick(self):
-        # iterate guilds
         for guild in list(self.bot.guilds):
             try:
                 gconf = self.config.guild(guild)
@@ -944,7 +839,6 @@ class VRChatCog(commands.Cog):
                     try:
                         u = await self.api.get_user_by_id(uid)
                     except VRChatError:
-                        # do not auto-remove; might be temporary / 2FA / cookie issue
                         await asyncio.sleep(0.6)
                         continue
 
@@ -976,7 +870,7 @@ class VRChatCog(commands.Cog):
 
                     last[uid] = new_pack
                     changed_any = True
-                    await asyncio.sleep(0.8)  # reduce rate
+                    await asyncio.sleep(0.8)
 
                 if changed_any:
                     await gconf.watch_last.set(last)
@@ -992,12 +886,11 @@ class VRChatCog(commands.Cog):
         full_profile: Dict[str, Any],
     ) -> discord.Embed:
         name = new.get("displayName") or user_id
-
         old_loc = str(old.get("location") or "")
         new_loc = str(new.get("location") or "")
 
-        old_wid, old_inst, old_kind = _parse_location(old_loc)
-        new_wid, new_inst, new_kind = _parse_location(new_loc)
+        _, new_inst, _ = _parse_location(new_loc)
+        new_wid, _, _ = _parse_location(new_loc)
 
         em = discord.Embed(
             title=f"🔔 VRChat status changed • {name}",
@@ -1035,7 +928,6 @@ class VRChatCog(commands.Cog):
             inline=True,
         )
 
-        # enrich world if new has world
         if new_wid:
             w = await self._get_world_cached(new_wid)
             if w:
@@ -1066,57 +958,23 @@ class VRChatCog(commands.Cog):
         return em
 
     # -----------------------------
-    # Owner commands
+    # Common error handler
     # -----------------------------
-    @commands.command(name="vrc.setcreds")
-    @commands.is_owner()
-    async def vrc_setcreds(self, ctx: commands.Context, username: str, password: str):
-        await self.config.vrchat_username.set(username)
-        await self.config.vrchat_password.set(password)
-        await self.config.auth_cookie.clear()
-        await self.config.pending_2fa_required.set(False)
-        await self.config.pending_2fa_methods.set([])
-        await self.config.pending_2fa_at.set(None)
-        await ctx.send("✅ VRChat credentials saved (previous auth cookie cleared).")
-
-    @commands.command(name="vrc.clearcookie")
-    @commands.is_owner()
-    async def vrc_clearcookie(self, ctx: commands.Context):
-        await self.config.auth_cookie.clear()
-        await self.config.pending_2fa_required.set(False)
-        await self.config.pending_2fa_methods.set([])
-        await self.config.pending_2fa_at.set(None)
-        await ctx.send("✅ Auth cookie cleared.")
-
-    @commands.command(name="vrc.watchinterval")
-    @commands.is_owner()
-    async def vrc_watchinterval(self, ctx: commands.Context, seconds: int):
-        if seconds < 20:
-            seconds = 20
-        await self.config.watch_interval_sec.set(int(seconds))
-        await ctx.send(f"✅ Watch interval set to {seconds}s.")
-
-    @commands.command(name="vrc.2fa")
-    @commands.is_owner()
-    async def vrc_2fa(self, ctx: commands.Context):
-        required = await self.config.pending_2fa_required()
-        methods = _normalize_2fa_methods(await self.config.pending_2fa_methods() or ["totp", "emailotp"])
-
-        if not required:
-            return await ctx.send("No pending 2FA verification right now. If you still get 401, try `vrc.clearcookie` then run any VRChat command again.")
-
-        em = discord.Embed(
-            title="VRChat 2FA Required",
-            description="VRChat requires 2FA verification for the bot account.\nUse the buttons below to enter your code.",
-            color=discord.Color.gold(),
-        )
-        em.add_field(name="Allowed methods", value=", ".join(methods) if methods else "unknown", inline=False)
-        await ctx.send(embed=em, view=TwoFAView(self, ctx.author.id, methods))
+    async def _handle_vrchat_error(self, ctx: commands.Context, e: VRChatError):
+        if e.status == 401 and "two-factor" in (e.message or "").lower():
+            methods = _normalize_2fa_methods(await self.config.pending_2fa_methods() or ["totp", "emailotp"])
+            return await ctx.send(
+                f"VRChat requires 2FA verification (HTTP {e.status}).\n"
+                f"Use the button below or run `vrc 2fa`.\n"
+                f"Details: {_clip(e.message, 240)}",
+                view=TwoFAView(self, ctx.author.id, methods),
+            )
+        return await ctx.send(f"Request failed (HTTP {e.status}): {_clip(e.message, 300)}")
 
     # -----------------------------
-    # Embeds (pretty)
+    # Embeds
     # -----------------------------
-    async def _build_user_detail_embed(self, u: Dict[str, Any], title_prefix: str = "", title: Optional[str] = None) -> discord.Embed:
+    async def _build_user_detail_embed(self, u: Dict[str, Any], title_prefix: str = "") -> discord.Embed:
         display = u.get("displayName") or "Unknown"
         uid = u.get("id") or "—"
 
@@ -1142,12 +1000,10 @@ class VRChatCog(commands.Cog):
             or u.get("profilePicOverride")
         )
 
-        t = title or f"{display}"
-        if title_prefix:
-            t = f"{title_prefix} • {t}"
+        title = display if not title_prefix else f"{title_prefix} • {display}"
 
         em = discord.Embed(
-            title=t,
+            title=title,
             url=_user_profile_url(uid) if uid != "—" else None,
             description=_clip(status_desc, 240),
             color=discord.Color.blurple(),
@@ -1172,7 +1028,7 @@ class VRChatCog(commands.Cog):
 
         where_lines = []
         where_lines.append(f"📍 **Location:** `{_clip(location, 140)}`")
-        where_lines.append(f"🔒 **Visibility:** `{kind}`" if kind in ("offline", "private", "traveling") else "🔒 **Visibility:** `world`")
+        where_lines.append(f"🔒 **Visibility:** `{kind if kind != 'unknown' else '—'}`")
 
         if effective_world_id:
             w = await self._get_world_cached(effective_world_id)
@@ -1203,17 +1059,15 @@ class VRChatCog(commands.Cog):
             where_lines.append(f"🎟️ **Instance:** `{_clip(effective_instance_id, 140)}`")
 
         em.add_field(name="Where (auto)", value=_clip("\n".join(where_lines), 1000), inline=False)
-
         em.add_field(name="📝 Bio", value=_clip(bio, 900), inline=False)
 
         if bio_links:
             links = [str(x) for x in bio_links[:10] if x]
             em.add_field(name="🔗 Bio Links", value=_clip("\n".join(links), 900), inline=False)
 
-        em.set_footer(text="Tip: Use 'Pin Detail' to post this embed as a new message.")
         return em
 
-    def _build_world_detail_embed(self, w: Dict[str, Any], title_prefix: str = "", title: Optional[str] = None) -> discord.Embed:
+    def _build_world_detail_embed(self, w: Dict[str, Any], title_prefix: str = "") -> discord.Embed:
         name = w.get("name") or "Unknown World"
         wid = w.get("id") or "—"
         author = w.get("authorName") or "—"
@@ -1239,12 +1093,10 @@ class VRChatCog(commands.Cog):
 
         image = w.get("thumbnailImageUrl") or w.get("imageUrl")
 
-        t = title or name
-        if title_prefix:
-            t = f"{title_prefix} • {t}"
+        title = name if not title_prefix else f"{title_prefix} • {name}"
 
         em = discord.Embed(
-            title=t,
+            title=title,
             url=_world_profile_url(wid) if wid != "—" else None,
             description=_clip(desc, 320),
             color=discord.Color.green(),
@@ -1278,12 +1130,8 @@ class VRChatCog(commands.Cog):
         if wid and wid != "—":
             em.add_field(name="🚀 Quick Launch", value=f"[Launch World]({_world_launch_url(wid)})", inline=False)
 
-        em.set_footer(text="Tip: 'Show Author Profile' is available on the World detail view.")
         return em
 
-    # -----------------------------
-    # List page embeds
-    # -----------------------------
     def _render_user_search_page(self, items: List[Dict[str, Any]], page: int, per_page: int) -> discord.Embed:
         start = page * per_page
         chunk = items[start : start + per_page]
@@ -1328,44 +1176,90 @@ class VRChatCog(commands.Cog):
         return em
 
     # -----------------------------
-    # Commands
+    # GROUP + SUBCOMMANDS (Requested #1 and #2)
     # -----------------------------
-    @commands.command(name="vrc.help")
+    @commands.group(name="vrc", invoke_without_command=True)
+    async def vrc(self, ctx: commands.Context):
+        """VRChat command group."""
+        await ctx.invoke(self.vrc_help)
+
+    @vrc.command(name="help")
     async def vrc_help(self, ctx: commands.Context):
         em = discord.Embed(title="VRChat Commands", color=discord.Color.blurple())
         em.description = (
-            "• `vrc.help`\n"
-            "• `vrc.uid <usr_...>` — user by ID (Pin Detail)\n"
-            "• `vrc.user <display name>` — search users + dropdown details (Pin Detail)\n"
-            "• `vrc.wid <wrld_...>` — world by ID (Pin Detail + Show Author)\n"
-            "• `vrc.world <world name>` — search worlds + dropdown details (Pin Detail + Show Author)\n"
-            "• `vrc.link` — link Discord ↔ VRChat ID (modal)\n"
-            "• `vrc.me` — show your linked profile\n"
-            "• `vrc.profile @member` — show a member's linked profile\n"
-            "• `vrc.2fa` — Owner-only: open 2FA verification UI (if required)\n\n"
-            "**Watchlist (guild)**\n"
-            "• `vrc.watchchannel [#channel]` — set notify channel\n"
-            "• `vrc.watch [usr_... | @member]` — add to watchlist (default = yourself if linked)\n"
-            "• `vrc.unwatch [usr_... | @member]`\n"
-            "• `vrc.watchlist`\n"
-            "• `vrc.watchclear`\n"
+            "**Core**\n"
+            "• `vrc help`\n"
+            "• `vrc uid <usr_...>` — fetch user by ID\n"
+            "• `vrc user <display name>` — search users + dropdown details\n"
+            "• `vrc wid <wrld_...>` — fetch world by ID (world-only: Show Author Profile button)\n"
+            "• `vrc world <world name>` — search worlds + dropdown details (world-only: Show Author Profile button)\n"
+            "• `vrc link` — link Discord ↔ VRChat ID (modal)\n"
+            "• `vrc me` — show your linked profile\n"
+            "• `vrc profile @member` — show a member's linked profile\n\n"
+            "**Owner**\n"
+            "• `vrc setcreds <username> <password>`\n"
+            "• `vrc clearcookie`\n"
+            "• `vrc watchinterval <seconds>` (min 20)\n"
+            "• `vrc 2fa` — open 2FA verification UI\n\n"
+            "**Watchlist (guild admin/manage_guild)**\n"
+            "• `vrc watchchannel [#channel]`\n"
+            "• `vrc watch [usr_... | @member]` (default = yourself if linked)\n"
+            "• `vrc unwatch [usr_... | @member]`\n"
+            "• `vrc watchlist`\n"
+            "• `vrc watchclear`\n"
         )
         await ctx.send(embed=em)
 
-    async def _handle_vrchat_error(self, ctx: commands.Context, e: VRChatError):
-        # Centralized 2FA helper
-        if e.status == 401 and "two-factor" in (e.message or "").lower():
-            methods = _normalize_2fa_methods(await self.config.pending_2fa_methods() or ["totp", "emailotp"])
-            view = TwoFAView(self, ctx.author.id, methods)
-            return await ctx.send(
-                f"VRChat requires 2FA verification (HTTP {e.status}).\n"
-                f"Use the button below or run `vrc.2fa`.\n"
-                f"Details: {_clip(e.message, 240)}",
-                view=view,
-            )
-        return await ctx.send(f"Request failed (HTTP {e.status}): {_clip(e.message, 300)}")
+    # ---- Owner subcommands ----
+    @vrc.command(name="setcreds")
+    @commands.is_owner()
+    async def vrc_setcreds(self, ctx: commands.Context, username: str, password: str):
+        await self.config.vrchat_username.set(username)
+        await self.config.vrchat_password.set(password)
+        await self.config.auth_cookie.clear()
+        await self.config.pending_2fa_required.set(False)
+        await self.config.pending_2fa_methods.set([])
+        await self.config.pending_2fa_at.set(None)
+        await ctx.send("✅ VRChat credentials saved (previous auth cookie cleared).")
 
-    @commands.command(name="vrc.uid")
+    @vrc.command(name="clearcookie")
+    @commands.is_owner()
+    async def vrc_clearcookie(self, ctx: commands.Context):
+        await self.config.auth_cookie.clear()
+        await self.config.pending_2fa_required.set(False)
+        await self.config.pending_2fa_methods.set([])
+        await self.config.pending_2fa_at.set(None)
+        await ctx.send("✅ Auth cookie cleared.")
+
+    @vrc.command(name="watchinterval")
+    @commands.is_owner()
+    async def vrc_watchinterval(self, ctx: commands.Context, seconds: int):
+        if seconds < 20:
+            seconds = 20
+        await self.config.watch_interval_sec.set(int(seconds))
+        await ctx.send(f"✅ Watch interval set to {seconds}s.")
+
+    @vrc.command(name="2fa")
+    @commands.is_owner()
+    async def vrc_2fa(self, ctx: commands.Context):
+        required = await self.config.pending_2fa_required()
+        methods = _normalize_2fa_methods(await self.config.pending_2fa_methods() or ["totp", "emailotp"])
+
+        if not required:
+            return await ctx.send(
+                "No pending 2FA verification right now. If you still get 401, run `vrc clearcookie` then try again."
+            )
+
+        em = discord.Embed(
+            title="VRChat 2FA Required",
+            description="VRChat requires 2FA verification for the bot account.\nUse the buttons below to enter your code.",
+            color=discord.Color.gold(),
+        )
+        em.add_field(name="Allowed methods", value=", ".join(methods) if methods else "unknown", inline=False)
+        await ctx.send(embed=em, view=TwoFAView(self, ctx.author.id, methods))
+
+    # ---- Core subcommands ----
+    @vrc.command(name="uid")
     async def vrc_uid(self, ctx: commands.Context, user_id: str):
         user_id = user_id.strip()
         if not USER_ID_RE.match(user_id):
@@ -1377,13 +1271,13 @@ class VRChatCog(commands.Cog):
         except VRChatError as e:
             return await self._handle_vrchat_error(ctx, e)
 
-        await ctx.send(embed=embed, view=DetailActionsView(self, ctx.author.id, "user", embed, u))
+        await ctx.send(embed=embed)
 
-    @commands.command(name="vrc.user")
+    @vrc.command(name="user")
     async def vrc_user(self, ctx: commands.Context, *, query: str):
         query = query.strip()
         if not query:
-            return await ctx.send("Please provide a query, e.g. `vrc.user neko`.")
+            return await ctx.send("Please provide a query, e.g. `vrc user neko`.")
 
         try:
             items = await self.api.search_users(query, n=60, offset=0)
@@ -1396,7 +1290,7 @@ class VRChatCog(commands.Cog):
         view = SearchResultsView(self, ctx.author.id, "user", items, per_page=10)
         await ctx.send(embed=view.render_list_embed(), view=view)
 
-    @commands.command(name="vrc.wid")
+    @vrc.command(name="wid")
     async def vrc_wid(self, ctx: commands.Context, world_id: str):
         world_id = world_id.strip()
         if not WORLD_ID_RE.match(world_id):
@@ -1408,13 +1302,13 @@ class VRChatCog(commands.Cog):
         except VRChatError as e:
             return await self._handle_vrchat_error(ctx, e)
 
-        await ctx.send(embed=embed, view=DetailActionsView(self, ctx.author.id, "world", embed, w))
+        await ctx.send(embed=embed, view=WorldAuthorView(self, ctx.author.id, w))
 
-    @commands.command(name="vrc.world")
+    @vrc.command(name="world")
     async def vrc_world(self, ctx: commands.Context, *, query: str):
         query = query.strip()
         if not query:
-            return await ctx.send("Please provide a query, e.g. `vrc.world chill`.")
+            return await ctx.send("Please provide a query, e.g. `vrc world chill`.")
 
         try:
             items = await self.api.search_worlds(query, n=60, offset=0, sort="popularity")
@@ -1427,7 +1321,7 @@ class VRChatCog(commands.Cog):
         view = SearchResultsView(self, ctx.author.id, "world", items, per_page=10)
         await ctx.send(embed=view.render_list_embed(), view=view)
 
-    @commands.command(name="vrc.link")
+    @vrc.command(name="link")
     async def vrc_link(self, ctx: commands.Context):
         view = discord.ui.View(timeout=60)
 
@@ -1445,11 +1339,11 @@ class VRChatCog(commands.Cog):
 
         await ctx.send("Click the button to enter your `usr_...` and link your account.", view=view)
 
-    @commands.command(name="vrc.me")
+    @vrc.command(name="me")
     async def vrc_me(self, ctx: commands.Context):
         vid = await self.config.user(ctx.author).vrchat_user_id()
         if not vid:
-            return await ctx.send("You haven't linked your VRChat ID yet. Use `vrc.link` first.")
+            return await ctx.send("You haven't linked your VRChat ID yet. Use `vrc link` first.")
 
         try:
             u = await self.api.get_user_by_id(vid)
@@ -1457,9 +1351,9 @@ class VRChatCog(commands.Cog):
         except VRChatError as e:
             return await self._handle_vrchat_error(ctx, e)
 
-        await ctx.send(embed=embed, view=DetailActionsView(self, ctx.author.id, "user", embed, u))
+        await ctx.send(embed=embed)
 
-    @commands.command(name="vrc.profile")
+    @vrc.command(name="profile")
     async def vrc_profile(self, ctx: commands.Context, member: discord.Member):
         vid = await self.config.user(member).vrchat_user_id()
         if not vid:
@@ -1471,31 +1365,28 @@ class VRChatCog(commands.Cog):
         except VRChatError as e:
             return await self._handle_vrchat_error(ctx, e)
 
-        await ctx.send(embed=embed, view=DetailActionsView(self, ctx.author.id, "user", embed, u))
+        await ctx.send(embed=embed)
 
     # -----------------------------
-    # Watchlist commands (guild)
+    # Watchlist subcommands (guild)
     # -----------------------------
+    @vrc.command(name="watchchannel")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @commands.command(name="vrc.watchchannel")
     async def vrc_watchchannel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
         channel = channel or ctx.channel
         await self.config.guild(ctx.guild).watch_channel_id.set(int(channel.id))
         await ctx.send(f"✅ Watchlist notify channel set to {channel.mention}.")
 
-    def _resolve_watch_target(self, ctx: commands.Context, target: Optional[str]) -> Optional[str]:
-        # mention has priority
+    def _resolve_watch_target(self, ctx: commands.Context, target: Optional[str]) -> str:
         if ctx.message.mentions:
             member = ctx.message.mentions[0]
             return f"member:{member.id}"
-
         if target:
             t = target.strip()
             if USER_ID_RE.match(t):
                 return t
             return t
-
         return "self"
 
     async def _get_vrchat_id_from_selector(self, ctx: commands.Context, selector: str) -> Optional[str]:
@@ -1511,17 +1402,18 @@ class VRChatCog(commands.Cog):
 
         if USER_ID_RE.match(selector):
             return selector
+
         return None
 
+    @vrc.command(name="watch")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @commands.command(name="vrc.watch")
     async def vrc_watch(self, ctx: commands.Context, *, target: Optional[str] = None):
         selector = self._resolve_watch_target(ctx, target)
         vid = await self._get_vrchat_id_from_selector(ctx, selector)
         if not vid:
             return await ctx.send(
-                "VRChat userId not found. If it's you/member, link first with `vrc.link`, or provide `usr_...` directly."
+                "VRChat userId not found. If it's you/member, link first with `vrc link`, or provide `usr_...` directly."
             )
 
         gconf = self.config.guild(ctx.guild)
@@ -1556,9 +1448,9 @@ class VRChatCog(commands.Cog):
 
         await ctx.send(f"✅ Added to watchlist: `{vid}`.")
 
+    @vrc.command(name="unwatch")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @commands.command(name="vrc.unwatch")
     async def vrc_unwatch(self, ctx: commands.Context, *, target: Optional[str] = None):
         selector = self._resolve_watch_target(ctx, target)
         vid = await self._get_vrchat_id_from_selector(ctx, selector)
@@ -1580,9 +1472,9 @@ class VRChatCog(commands.Cog):
 
         await ctx.send(f"✅ Removed from watchlist: `{vid}`.")
 
+    @vrc.command(name="watchlist")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @commands.command(name="vrc.watchlist")
     async def vrc_watchlist(self, ctx: commands.Context):
         gconf = self.config.guild(ctx.guild)
         ids: List[str] = await gconf.watch_user_ids()
@@ -1602,12 +1494,12 @@ class VRChatCog(commands.Cog):
 
         em = discord.Embed(title="👀 VRChat Watchlist", description="\n\n".join(lines), color=discord.Color.orange())
         ch_id = await gconf.watch_channel_id()
-        em.set_footer(text=f"Notify channel ID: {ch_id or 'not set'} • use vrc.watchchannel")
+        em.set_footer(text=f"Notify channel ID: {ch_id or 'not set'} • use vrc watchchannel")
         await ctx.send(embed=em)
 
+    @vrc.command(name="watchclear")
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @commands.command(name="vrc.watchclear")
     async def vrc_watchclear(self, ctx: commands.Context):
         gconf = self.config.guild(ctx.guild)
         await gconf.watch_user_ids.set([])
