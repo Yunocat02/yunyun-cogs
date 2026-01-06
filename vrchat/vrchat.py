@@ -410,7 +410,7 @@ class TwoFAModal(discord.ui.Modal):
         is_owner = await self.cog.bot.is_owner(interaction.user)
         if not is_owner:
             return await interaction.response.send_message(
-                "Only the bot owner can submit the 2FA code.",
+                "Only the bot owner can submit a 2FA verification code.",
                 ephemeral=True,
             )
 
@@ -475,7 +475,7 @@ class LinkVRChatModal(discord.ui.Modal, title="Link VRChat Account"):
     async def on_submit(self, interaction: discord.Interaction):
         user_id = str(self.vrchat_user_id.value).strip()
         if not USER_ID_RE.match(user_id):
-            await interaction.response.send_message("Invalid format. Must be `usr_...` (UUID).", ephemeral=True)
+            await interaction.response.send_message("Invalid format. Expected `usr_...` (UUID).", ephemeral=True)
             return
 
         try:
@@ -517,7 +517,7 @@ class WorldAuthorView(discord.ui.View):
         if interaction.user and interaction.user.id == self.author_id:
             return True
         await interaction.response.send_message(
-            "This button can only be used by the user who invoked the command.",
+            "This button is only available to the user who invoked the command.",
             ephemeral=True,
         )
         return False
@@ -587,6 +587,9 @@ class SearchResultsView(discord.ui.View):
         self.select_menu.callback = self._on_select
         self.add_item(self.select_menu)
 
+        # Show the author button only when viewing World details.
+        self._set_author_button_visible(False)
+
         self._sync()
 
     def _max_page(self) -> int:
@@ -600,22 +603,35 @@ class SearchResultsView(discord.ui.View):
         if interaction.user and interaction.user.id == self.author_id:
             return True
         await interaction.response.send_message(
-            "This menu/button can only be used by the user who invoked the command.",
+            "This control is only available to the user who invoked the command.",
             ephemeral=True,
         )
         return False
+
+
+    def _set_author_button_visible(self, visible: bool):
+        """Show the 'Show Author Profile' button only when applicable."""
+        try:
+            is_present = self.author_button in self.children
+            if visible and not is_present:
+                self.add_item(self.author_button)
+            elif (not visible) and is_present:
+                self.remove_item(self.author_button)
+        except Exception:
+            # View mutations can fail in some edge cases; fail safely.
+            pass
 
     def _sync(self):
         self.prev_button.disabled = (self.mode != "list") or (self.page <= 0)
         self.next_button.disabled = (self.mode != "list") or (self.page >= self._max_page())
         self.back_button.disabled = (self.mode != "detail")
 
-        # world author button only on world detail
-        if self.mode == "detail" and self.kind == "world" and isinstance(self.current_detail_payload, dict):
+        # World author button: only visible on World detail views.
+        author_visible = (self.kind == "world" and self.mode == "detail")
+        self._set_author_button_visible(author_visible)
+        if author_visible and isinstance(self.current_detail_payload, dict):
             aid = str(self.current_detail_payload.get("authorId") or "").strip()
             self.author_button.disabled = not USER_ID_RE.match(aid)
-        else:
-            self.author_button.disabled = True
 
         if self.mode != "list":
             self.select_menu.disabled = True
@@ -663,7 +679,7 @@ class SearchResultsView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction):
         if self.mode != "list":
-            return await interaction.response.send_message("Press Back to return to the list first.", ephemeral=True)
+            return await interaction.response.send_message("Please use **Back** to return to the results list first.", ephemeral=True)
 
         item_id = str(self.select_menu.values[0]).strip()
         self.mode = "detail"
@@ -716,13 +732,13 @@ class SearchResultsView(discord.ui.View):
     async def author_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.kind != "world" or not isinstance(self.current_detail_payload, dict):
             return await interaction.response.send_message(
-                "This button is only available on World detail views.",
+                "This button is only available when viewing World details.",
                 ephemeral=True,
             )
 
         view = WorldAuthorView(self.cog, self.author_id, self.current_detail_payload)
         await interaction.response.send_message(
-            "Press the button to fetch the world author's profile.",
+            "Click the button below to fetch the world author's profile.",
             ephemeral=True,
             view=view,
         )
@@ -1185,6 +1201,7 @@ class VRChatCog(commands.Cog):
 
     @vrc.command(name="help")
     async def vrc_help(self, ctx: commands.Context):
+        """Show an overview of available VRChat commands."""
         em = discord.Embed(title="VRChat Commands", color=discord.Color.blurple())
         em.description = (
             "**Core**\n"
@@ -1214,6 +1231,7 @@ class VRChatCog(commands.Cog):
     @vrc.command(name="setcreds")
     @commands.is_owner()
     async def vrc_setcreds(self, ctx: commands.Context, username: str, password: str):
+        """Owner-only. Save VRChat credentials for the bot account and clear the current auth cookie."""
         await self.config.vrchat_username.set(username)
         await self.config.vrchat_password.set(password)
         await self.config.auth_cookie.clear()
@@ -1225,6 +1243,7 @@ class VRChatCog(commands.Cog):
     @vrc.command(name="clearcookie")
     @commands.is_owner()
     async def vrc_clearcookie(self, ctx: commands.Context):
+        """Owner-only. Clear the saved VRChat auth cookie (forces a fresh login)."""
         await self.config.auth_cookie.clear()
         await self.config.pending_2fa_required.set(False)
         await self.config.pending_2fa_methods.set([])
@@ -1234,6 +1253,7 @@ class VRChatCog(commands.Cog):
     @vrc.command(name="watchinterval")
     @commands.is_owner()
     async def vrc_watchinterval(self, ctx: commands.Context, seconds: int):
+        """Owner-only. Set the watchlist polling interval in seconds (minimum 20s)."""
         if seconds < 20:
             seconds = 20
         await self.config.watch_interval_sec.set(int(seconds))
@@ -1242,12 +1262,13 @@ class VRChatCog(commands.Cog):
     @vrc.command(name="2fa")
     @commands.is_owner()
     async def vrc_2fa(self, ctx: commands.Context):
+        """Owner-only. Open the interactive 2FA verification UI when VRChat requires 2FA."""
         required = await self.config.pending_2fa_required()
         methods = _normalize_2fa_methods(await self.config.pending_2fa_methods() or ["totp", "emailotp"])
 
         if not required:
             return await ctx.send(
-                "No pending 2FA verification right now. If you still get 401, run `vrc clearcookie` then try again."
+                "No 2FA verification is pending. If you still receive HTTP 401, run `vrc clearcookie` and try again."
             )
 
         em = discord.Embed(
@@ -1261,9 +1282,10 @@ class VRChatCog(commands.Cog):
     # ---- Core subcommands ----
     @vrc.command(name="uid")
     async def vrc_uid(self, ctx: commands.Context, user_id: str):
+        """Fetch a VRChat user profile by VRChat user ID (usr_...)."""
         user_id = user_id.strip()
         if not USER_ID_RE.match(user_id):
-            return await ctx.send("Invalid format. Must be `usr_...` (UUID).")
+            return await ctx.send("Invalid format. Expected `usr_...` (UUID).")
 
         try:
             u = await self.api.get_user_by_id(user_id)
@@ -1275,6 +1297,7 @@ class VRChatCog(commands.Cog):
 
     @vrc.command(name="user")
     async def vrc_user(self, ctx: commands.Context, *, query: str):
+        """Search VRChat users by display name and open details via the dropdown."""
         query = query.strip()
         if not query:
             return await ctx.send("Please provide a query, e.g. `vrc user neko`.")
@@ -1285,16 +1308,17 @@ class VRChatCog(commands.Cog):
             return await self._handle_vrchat_error(ctx, e)
 
         if not items:
-            return await ctx.send("No users found for that query.")
+            return await ctx.send("No users were found for that query.")
 
         view = SearchResultsView(self, ctx.author.id, "user", items, per_page=10)
         await ctx.send(embed=view.render_list_embed(), view=view)
 
     @vrc.command(name="wid")
     async def vrc_wid(self, ctx: commands.Context, world_id: str):
+        """Fetch a VRChat world by VRChat world ID (wrld_...). Includes a world-only author button."""
         world_id = world_id.strip()
         if not WORLD_ID_RE.match(world_id):
-            return await ctx.send("Invalid format. Must be `wrld_...` (UUID).")
+            return await ctx.send("Invalid format. Expected `wrld_...` (UUID).")
 
         try:
             w = await self.api.get_world_by_id(world_id)
@@ -1306,6 +1330,7 @@ class VRChatCog(commands.Cog):
 
     @vrc.command(name="world")
     async def vrc_world(self, ctx: commands.Context, *, query: str):
+        """Search VRChat worlds by name and open details via the dropdown."""
         query = query.strip()
         if not query:
             return await ctx.send("Please provide a query, e.g. `vrc world chill`.")
@@ -1316,13 +1341,14 @@ class VRChatCog(commands.Cog):
             return await self._handle_vrchat_error(ctx, e)
 
         if not items:
-            return await ctx.send("No worlds found for that query.")
+            return await ctx.send("No worlds were found for that query.")
 
         view = SearchResultsView(self, ctx.author.id, "world", items, per_page=10)
         await ctx.send(embed=view.render_list_embed(), view=view)
 
     @vrc.command(name="link")
     async def vrc_link(self, ctx: commands.Context):
+        """Link your Discord account to a VRChat user ID via a secure modal."""
         view = discord.ui.View(timeout=60)
 
         async def _open_modal(interaction: discord.Interaction):
@@ -1341,6 +1367,7 @@ class VRChatCog(commands.Cog):
 
     @vrc.command(name="me")
     async def vrc_me(self, ctx: commands.Context):
+        """Show your linked VRChat profile (requires `vrc link`)."""
         vid = await self.config.user(ctx.author).vrchat_user_id()
         if not vid:
             return await ctx.send("You haven't linked your VRChat ID yet. Use `vrc link` first.")
@@ -1355,6 +1382,7 @@ class VRChatCog(commands.Cog):
 
     @vrc.command(name="profile")
     async def vrc_profile(self, ctx: commands.Context, member: discord.Member):
+        """Show a mentioned member’s linked VRChat profile (requires them to use `vrc link`)."""
         vid = await self.config.user(member).vrchat_user_id()
         if not vid:
             return await ctx.send(f"{member.mention} has not linked a VRChat ID.")
@@ -1374,6 +1402,7 @@ class VRChatCog(commands.Cog):
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def vrc_watchchannel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Admin/manage_guild. Set the channel where watchlist notifications will be sent."""
         channel = channel or ctx.channel
         await self.config.guild(ctx.guild).watch_channel_id.set(int(channel.id))
         await ctx.send(f"✅ Watchlist notify channel set to {channel.mention}.")
@@ -1409,6 +1438,7 @@ class VRChatCog(commands.Cog):
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def vrc_watch(self, ctx: commands.Context, *, target: Optional[str] = None):
+        """Admin/manage_guild. Add a VRChat user to the guild watchlist (usr_... or mention a linked member)."""
         selector = self._resolve_watch_target(ctx, target)
         vid = await self._get_vrchat_id_from_selector(ctx, selector)
         if not vid:
@@ -1451,6 +1481,7 @@ class VRChatCog(commands.Cog):
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def vrc_unwatch(self, ctx: commands.Context, *, target: Optional[str] = None):
+        """Admin/manage_guild. Remove a VRChat user from the guild watchlist."""
         selector = self._resolve_watch_target(ctx, target)
         vid = await self._get_vrchat_id_from_selector(ctx, selector)
         if not vid:
@@ -1475,10 +1506,11 @@ class VRChatCog(commands.Cog):
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def vrc_watchlist(self, ctx: commands.Context):
+        """Admin/manage_guild. Show the current guild watchlist."""
         gconf = self.config.guild(ctx.guild)
         ids: List[str] = await gconf.watch_user_ids()
         if not ids:
-            return await ctx.send("The watchlist is empty.")
+            return await ctx.send("The watchlist is currently empty.")
 
         last = await gconf.watch_last()
         lines = []
@@ -1500,6 +1532,7 @@ class VRChatCog(commands.Cog):
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def vrc_watchclear(self, ctx: commands.Context):
+        """Admin/manage_guild. Clear the guild watchlist."""
         gconf = self.config.guild(ctx.guild)
         await gconf.watch_user_ids.set([])
         await gconf.watch_last.set({})
