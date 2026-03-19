@@ -388,93 +388,20 @@ class MinecraftCog(commands.Cog):
                 pass
             # Fall through to save state and check players below
 
-        # ── Player join / leave detection ────────────────────────────────────
-        if status.online:
+        # ── Player count change → send full status embed ──────────────────────
+        # Only fires when the numeric player count actually changes.
+        # If the count stays the same but the sample rotates (large server), no alert.
+        if status.online and last_count is not None:
             current_count = status.players_online or 0
-            current_names = set(status.player_names)
-            old_names = set(last_players)
-
-            # "Full list" = sample contains exactly as many names as online count
-            sample_is_full = (
-                status.players_online is not None
-                and len(status.player_names) == status.players_online
-            )
-            last_sample_was_full = (
-                last_count is not None
-                and len(last_players) == last_count
-            )
-
-            if sample_is_full and last_sample_was_full:
-                # ── Name-level tracking ──────────────────────────────────────
-                joined = sorted(current_names - old_names)
-                left = sorted(old_names - current_names)
-
-                if joined:
-                    names_str = ", ".join(f"**{n}**" for n in joined)
-                    embed = discord.Embed(
-                        title=f"➕ {'Player' if len(joined) == 1 else 'Players'} Joined",
-                        description=names_str,
-                        color=discord.Color.green(),
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    embed.set_footer(text=f"{host}:{port}  •  {current_count}/{status.players_max or '?'} players")
-                    try:
+            if current_count != last_count:
+                embed, favicon_file = self._build_status_embed(status)
+                try:
+                    if favicon_file:
+                        await channel.send(embed=embed, file=favicon_file)
+                    else:
                         await channel.send(embed=embed)
-                    except Exception:
-                        pass
-
-                if left:
-                    names_str = ", ".join(f"**{n}**" for n in left)
-                    embed = discord.Embed(
-                        title=f"➖ {'Player' if len(left) == 1 else 'Players'} Left",
-                        description=names_str,
-                        color=discord.Color.orange(),
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    embed.set_footer(text=f"{host}:{port}  •  {current_count}/{status.players_max or '?'} players")
-                    try:
-                        await channel.send(embed=embed)
-                    except Exception:
-                        pass
-
-            elif last_count is not None:
-                # ── Count-level tracking (sample incomplete) ─────────────────
-                # NOTE: On large servers the sample is a random ~12-name subset
-                # that rotates every ping. We cannot derive who actually joined/left
-                # from sample diffs, so we only report the count change.
-                if current_count > last_count:
-                    diff = current_count - last_count
-                    embed = discord.Embed(
-                        title=f"➕ {diff} Player{'s' if diff != 1 else ''} Joined",
-                        description=(
-                            f"Player count: **{last_count}** → **{current_count}**"
-                            f"/{status.players_max or '?'}"
-                        ),
-                        color=discord.Color.green(),
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    embed.set_footer(text=f"{host}:{port}  •  Minecraft Monitor")
-                    try:
-                        await channel.send(embed=embed)
-                    except Exception:
-                        pass
-
-                elif current_count < last_count:
-                    diff = last_count - current_count
-                    embed = discord.Embed(
-                        title=f"➖ {diff} Player{'s' if diff != 1 else ''} Left",
-                        description=(
-                            f"Player count: **{last_count}** → **{current_count}**"
-                            f"/{status.players_max or '?'}"
-                        ),
-                        color=discord.Color.orange(),
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    embed.set_footer(text=f"{host}:{port}  •  Minecraft Monitor")
-                    try:
-                        await channel.send(embed=embed)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
         # ── Save state ───────────────────────────────────────────────────────
         await gconf.last_online.set(status.online)
