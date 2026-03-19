@@ -1,0 +1,13 @@
+{
+  "name": "minecraft",
+  "author": ["yunyun"],
+  "short": "Minecraft Java server monitor — status, player tracking, join/leave notifications",
+  "description": "Monitor a Minecraft Java Edition server: query live status and player list, receive Discord notifications whenever players join/leave or the server goes offline/online. Per-guild config with IP:port setting, channel selection, and an enable/disable toggle. No external dependencies — uses the native Server List Ping protocol.",
+  "install_msg": "Loaded! Admin: set the server with `mc set <host> [port]`, choose a channel with `mc channel #channel`, then start monitoring with `mc enable`. Run `mc help` for the full command list.",
+  "requirements": [],
+  "tags": ["minecraft", "utility", "monitor", "notification", "players"],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}
