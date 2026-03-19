@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import logging
 import re
@@ -118,6 +120,7 @@ class MCStatus:
         "online", "host", "port", "latency_ms",
         "version", "protocol",
         "motd", "players_online", "players_max", "player_names",
+        "favicon_bytes",  # raw PNG bytes decoded from base64, or None
         "error",
     )
 
@@ -132,6 +135,7 @@ class MCStatus:
         self.players_online: Optional[int] = None
         self.players_max: Optional[int] = None
         self.player_names: List[str] = []
+        self.favicon_bytes: Optional[bytes] = None
         self.error: Optional[str] = None
 
 
@@ -211,6 +215,15 @@ async def query_java_server(host: str, port: int, timeout: float = 8.0) -> MCSta
             p.get("name", "") for p in sample
             if isinstance(p, dict) and p.get("name")
         ]
+
+        # favicon is "data:image/png;base64,<b64>" — decode to raw bytes
+        favicon_str = data.get("favicon")
+        if isinstance(favicon_str, str) and "," in favicon_str:
+            try:
+                b64_part = favicon_str.split(",", 1)[1]
+                status.favicon_bytes = base64.b64decode(b64_part)
+            except Exception:
+                pass
 
     except asyncio.TimeoutError:
         if not status.online:
@@ -476,7 +489,20 @@ class MinecraftCog(commands.Cog):
     # Embed builders
     # ──────────────────────────────────────────
 
-    def _build_status_embed(self, status: MCStatus) -> discord.Embed:
+    def _build_status_embed(
+        self,
+        status: MCStatus,
+        *,
+        title_prefix: str = "",
+    ) -> Tuple[discord.Embed, Optional[discord.File]]:
+        """
+        Returns (embed, file_or_None).
+        If the server sent a favicon, `file` is a discord.File("favicon.png")
+        and the embed thumbnail is set to "attachment://favicon.png".
+        Send with: await channel.send(embed=embed, file=file)
+        """
+        favicon_file: Optional[discord.File] = None
+
         if not status.online:
             em = discord.Embed(
                 title="🔴 Server Offline",
@@ -484,11 +510,12 @@ class MinecraftCog(commands.Cog):
                 color=discord.Color.red(),
                 timestamp=datetime.now(timezone.utc),
             )
-            em.set_footer(text=f"{status.host}:{status.port}")
-            return em
+            em.set_footer(text=f"{status.host}:{status.port}  •  Minecraft Monitor")
+            return em, None
 
+        prefix = f"{title_prefix} " if title_prefix else ""
         em = discord.Embed(
-            title=f"🟢 {status.host}:{status.port}",
+            title=f"{prefix}🟢 {status.host}:{status.port}",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -513,17 +540,25 @@ class MinecraftCog(commands.Cog):
             names_str = "\n".join(f"• {n}" for n in status.player_names[:30])
             label = "🧑 Online Players (sample)" if is_sample else "🧑 Online Players"
             em.add_field(name=label, value=names_str[:1024], inline=False)
-            if is_sample:
-                em.set_footer(text="⚠️  Server returns a partial player list. Minecraft Monitor")
-            else:
-                em.set_footer(text="Minecraft Monitor")
+            footer_extra = "⚠️  Server returns a partial player list.  •  " if is_sample else ""
+            em.set_footer(text=f"{footer_extra}Minecraft Monitor")
         elif status.players_online == 0:
             em.add_field(name="🧑 Online Players", value="*No players online.*", inline=False)
             em.set_footer(text="Minecraft Monitor")
         else:
             em.set_footer(text="Minecraft Monitor")
 
-        return em
+        # Attach favicon as thumbnail
+        if status.favicon_bytes:
+            try:
+                favicon_file = discord.File(
+                    io.BytesIO(status.favicon_bytes), filename="favicon.png"
+                )
+                em.set_thumbnail(url="attachment://favicon.png")
+            except Exception:
+                favicon_file = None
+
+        return em, favicon_file
 
     # ──────────────────────────────────────────
     # Command group
@@ -723,7 +758,11 @@ class MinecraftCog(commands.Cog):
         async with ctx.typing():
             status = await query_java_server(host, port)
 
-        await ctx.send(embed=self._build_status_embed(status))
+        embed, favicon_file = self._build_status_embed(status)
+        if favicon_file:
+            await ctx.send(embed=embed, file=favicon_file)
+        else:
+            await ctx.send(embed=embed)
 
     @mc.command(name="players")
     @commands.guild_only()
@@ -741,48 +780,11 @@ class MinecraftCog(commands.Cog):
         async with ctx.typing():
             status = await query_java_server(host, port)
 
-        if not status.online:
-            em = discord.Embed(
-                title="🔴 Server Offline",
-                description=status.error or "Could not reach server.",
-                color=discord.Color.red(),
-            )
-            em.set_footer(text=f"{host}:{port}")
-            return await ctx.send(embed=em)
-
-        cnt = status.players_online or 0
-        mx = status.players_max or "?"
-        em = discord.Embed(
-            title=f"👥 Players on {host}:{port}",
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        em.add_field(name="Online / Max", value=f"`{cnt}/{mx}`", inline=True)
-        if status.latency_ms is not None:
-            em.add_field(name="Ping", value=f"`{status.latency_ms:.1f} ms`", inline=True)
-
-        if status.player_names:
-            is_sample = (
-                status.players_online is not None
-                and len(status.player_names) < status.players_online
-            )
-            names_block = "\n".join(f"• {n}" for n in status.player_names[:50])
-            label = "Players (sample)" if is_sample else "Players"
-            em.add_field(name=label, value=names_block[:1024], inline=False)
-            if is_sample:
-                em.set_footer(
-                    text="⚠️  The server only exposes a sample of the player list."
-                )
-        elif cnt == 0:
-            em.add_field(name="Players", value="*No players online.*", inline=False)
+        embed, favicon_file = self._build_status_embed(status)
+        if favicon_file:
+            await ctx.send(embed=embed, file=favicon_file)
         else:
-            em.add_field(
-                name="Players",
-                value="*Player names unavailable (server disabled the sample list).*",
-                inline=False,
-            )
-
-        await ctx.send(embed=em)
+            await ctx.send(embed=embed)
 
     # ── Owner commands ────────────────────────────────────────────────────────
 
