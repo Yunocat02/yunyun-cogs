@@ -4,7 +4,7 @@
   "short": "Keeps the bot locked to a configured voice channel — rejoins automatically if disconnected.",
   "description": "Per-guild auto-rejoin system. Set a target voice channel, then enable the feature. The bot will join immediately and rejoin automatically whenever it is kicked, disconnected, or moved away. Disabled by default; each guild controls its own toggle independently. Includes an instant event-driven rejoin on disconnect plus a periodic watchdog loop as a safety net.",
   "install_msg": "Loaded! Admin: set the target channel with `autorejoin setup #voice-channel`, then run `autorejoin enable`. Use `autorejoin status` to check the current state.",
-  "requirements": [],
+  "requirements": ["PyNaCl"],
   "tags": ["voice", "utility", "autorejoin", "reconnect"],
   "min_bot_version": "3.5.0",
   "hidden": false,

@@ -45,6 +45,10 @@ class AutoRejoin(commands.Cog):
         # Per-guild asyncio lock — prevents concurrent rejoin attempts
         self._locks: dict[int, asyncio.Lock] = {}
 
+        # Guilds where native voice is unavailable (e.g. PyNaCl not installed).
+        # We log once and stop retrying so the log is not spammed.
+        self._nacl_unavailable: set[int] = set()
+
         self._watchdog_task: Optional[asyncio.Task] = asyncio.create_task(
             self._watchdog_loop()
         )
@@ -58,9 +62,27 @@ class AutoRejoin(commands.Cog):
             self._locks[guild_id] = asyncio.Lock()
         return self._locks[guild_id]
 
-    async def _guild_voice_client(self, guild: discord.Guild) -> Optional[discord.VoiceClient]:
-        """Return the bot's VoiceClient for *guild*, or None."""
-        return guild.voice_client  # type: ignore[return-value]
+    def _is_vc_connected(self, vc) -> bool:
+        """Return True if *vc* is connected, handling both discord.VoiceClient and Lavalink Player."""
+        if vc is None:
+            return False
+        if isinstance(vc, discord.VoiceClient):
+            return vc.is_connected()
+        # Lavalink / wavelink: is_connected is a property, not a method
+        val = getattr(vc, "is_connected", None)
+        if val is None:
+            return False
+        return bool(val() if callable(val) else val)
+
+    def _vc_channel_id(self, vc) -> Optional[int]:
+        """Return the channel ID the voice client is in, or None."""
+        if vc is None:
+            return None
+        ch = getattr(vc, "channel", None)
+        if ch is not None:
+            return getattr(ch, "id", None)
+        # lavalink.Player stores channel_id as a bare int
+        return getattr(vc, "channel_id", None)
 
     async def _try_join(self, guild: discord.Guild, channel: discord.VoiceChannel) -> bool:
         """
@@ -73,18 +95,33 @@ class AutoRejoin(commands.Cog):
 
         async with lock:
             try:
-                vc: Optional[discord.VoiceClient] = guild.voice_client  # type: ignore
+                vc = guild.voice_client
                 if vc is not None:
-                    if vc.channel.id == channel.id and vc.is_connected():
+                    if self._vc_channel_id(vc) == channel.id and self._is_vc_connected(vc):
                         return True  # already in the right place
                     log.debug("[%s] Moving to %s", guild.name, channel.name)
                     await asyncio.wait_for(vc.move_to(channel), timeout=CONNECT_TIMEOUT)
                 else:
+                    if guild.id in self._nacl_unavailable:
+                        return False  # already noted — don't spam
                     log.debug("[%s] Connecting to %s", guild.name, channel.name)
                     await asyncio.wait_for(
                         channel.connect(reconnect=True), timeout=CONNECT_TIMEOUT
                     )
                 return True
+            except RuntimeError as exc:
+                if "PyNaCl" in str(exc):
+                    if guild.id not in self._nacl_unavailable:
+                        self._nacl_unavailable.add(guild.id)
+                        log.error(
+                            "[%s] PyNaCl is not installed — cannot open a native voice connection. "
+                            "If this server uses Red's Audio (Lavalink), the bot rejoins voice "
+                            "automatically through that cog; auto-rejoin cannot reconnect "
+                            "independently without PyNaCl. Retries suppressed until cog reload.",
+                            guild.name,
+                        )
+                else:
+                    log.warning("[%s] RuntimeError joining %s: %s", guild.name, channel.name, exc)
             except asyncio.TimeoutError:
                 log.warning("[%s] Timed out while joining %s", guild.name, channel.name)
             except discord.ClientException as exc:
@@ -108,8 +145,8 @@ class AutoRejoin(commands.Cog):
             log.warning("[%s] Configured channel %s not found or not a voice channel.", guild.name, channel_id)
             return
 
-        vc: Optional[discord.VoiceClient] = guild.voice_client  # type: ignore
-        if vc is None or not vc.is_connected() or vc.channel.id != channel_id:
+        vc = guild.voice_client
+        if vc is None or not self._is_vc_connected(vc) or self._vc_channel_id(vc) != channel_id:
             log.info("[%s] Not in target channel — rejoining %s", guild.name, channel.name)
             await self._try_join(guild, channel)
 
