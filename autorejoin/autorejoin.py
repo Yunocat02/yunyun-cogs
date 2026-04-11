@@ -5,31 +5,21 @@ import logging
 from typing import Optional
 
 import discord
+import lavalink
 from redbot.core import commands, Config
-from redbot.core.utils.chat_formatting import box
 
 log = logging.getLogger("red.autorejoin")
 
-# ─────────────────────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────────────────────
+CHECK_INTERVAL = 10
+REJOIN_DELAY = 3.0
+CONNECT_TIMEOUT = 15.0
 
-CHECK_INTERVAL = 10          # seconds between each watchdog tick
-REJOIN_DELAY   = 3.0         # seconds to wait before rejoining after a drop
-CONNECT_TIMEOUT = 10.0       # seconds to wait for a voice connection
-
-
-# ─────────────────────────────────────────────────────────────
-# Cog
-# ─────────────────────────────────────────────────────────────
 
 class AutoRejoin(commands.Cog):
     """
-    Auto-Rejoin Voice — keeps the bot locked to a configured voice channel.
-
-    Per-guild: choose which voice channel the bot must stay in, then toggle
-    the feature on/off. When enabled, the bot joins immediately and rejoins
-    automatically whenever it is disconnected or moved away.
+    Auto-Rejoin Voice using Red Audio / Lavalink.
+    Keeps the bot attached to a configured voice channel by creating or moving
+    the Lavalink player instead of opening a native Discord voice connection.
     """
 
     def __init__(self, bot):
@@ -39,120 +29,103 @@ class AutoRejoin(commands.Cog):
         )
         self.config.register_guild(
             enabled=False,
-            channel_id=None,   # voice channel ID to stay in
+            channel_id=None,
         )
 
-        # Per-guild asyncio lock — prevents concurrent rejoin attempts
         self._locks: dict[int, asyncio.Lock] = {}
-
-        # Guilds where native voice is unavailable (e.g. PyNaCl not installed).
-        # We log once and stop retrying so the log is not spammed.
-        self._nacl_unavailable: set[int] = set()
-
         self._watchdog_task: Optional[asyncio.Task] = asyncio.create_task(
             self._watchdog_loop()
         )
-
-    # ──────────────────────────────────────────
-    # Helpers
-    # ──────────────────────────────────────────
 
     def _get_lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._locks:
             self._locks[guild_id] = asyncio.Lock()
         return self._locks[guild_id]
 
-    def _is_vc_connected(self, vc) -> bool:
-        """Return True if *vc* is connected, handling both discord.VoiceClient and Lavalink Player."""
-        if vc is None:
-            return False
-        if isinstance(vc, discord.VoiceClient):
-            return vc.is_connected()
-        # Lavalink / wavelink: is_connected is a property, not a method
-        val = getattr(vc, "is_connected", None)
-        if val is None:
-            return False
-        return bool(val() if callable(val) else val)
-
-    def _vc_channel_id(self, vc) -> Optional[int]:
-        """Return the channel ID the voice client is in, or None."""
-        if vc is None:
+    def _get_target_channel(
+        self, guild: discord.Guild, channel_id: Optional[int]
+    ) -> Optional[discord.VoiceChannel]:
+        if channel_id is None:
             return None
-        ch = getattr(vc, "channel", None)
-        if ch is not None:
-            return getattr(ch, "id", None)
-        # lavalink.Player stores channel_id as a bare int
-        return getattr(vc, "channel_id", None)
+        ch = guild.get_channel(channel_id)
+        return ch if isinstance(ch, discord.VoiceChannel) else None
 
-    async def _try_join(self, guild: discord.Guild, channel: discord.VoiceChannel) -> bool:
+    def _get_ll_player(self, guild_id: int):
+        try:
+            return lavalink.get_player(guild_id)
+        except Exception:
+            return None
+
+    async def _lavalink_connect(
+        self, guild: discord.Guild, channel: discord.VoiceChannel
+    ) -> bool:
         """
-        Join *channel* in *guild*.  If already connected to the wrong channel,
-        move; if disconnected, connect fresh.  Returns True on success.
+        Ensure a Lavalink player exists and is connected to the target channel.
         """
         lock = self._get_lock(guild.id)
         if lock.locked():
-            return False  # another rejoin is already in progress
+            return False
 
         async with lock:
             try:
-                vc = guild.voice_client
-                if vc is not None:
-                    if self._vc_channel_id(vc) == channel.id and self._is_vc_connected(vc):
-                        return True  # already in the right place
-                    log.debug("[%s] Moving to %s", guild.name, channel.name)
-                    await asyncio.wait_for(vc.move_to(channel), timeout=CONNECT_TIMEOUT)
-                else:
-                    if guild.id in self._nacl_unavailable:
-                        return False  # already noted — don't spam
-                    log.debug("[%s] Connecting to %s", guild.name, channel.name)
+                player = self._get_ll_player(guild.id)
+
+                # Case 1: no player yet -> create via Lavalink
+                if player is None:
+                    log.info("[%s] No Lavalink player — connecting to %s", guild.name, channel.name)
                     await asyncio.wait_for(
-                        channel.connect(reconnect=True), timeout=CONNECT_TIMEOUT
+                        lavalink.connect(channel, self_deaf=True),
+                        timeout=CONNECT_TIMEOUT,
                     )
+                    return True
+
+                # Case 2: player exists but wrong channel -> move via player
+                current_channel_id = getattr(player, "channel_id", None)
+                is_connected = bool(getattr(player, "is_connected", False))
+
+                if current_channel_id == channel.id and is_connected:
+                    return True
+
+                log.info(
+                    "[%s] Lavalink player not in target channel (current=%s, target=%s) — moving",
+                    guild.name,
+                    current_channel_id,
+                    channel.id,
+                )
+
+                await asyncio.wait_for(player.move_to(channel), timeout=CONNECT_TIMEOUT)
                 return True
-            except RuntimeError as exc:
-                if "PyNaCl" in str(exc):
-                    if guild.id not in self._nacl_unavailable:
-                        self._nacl_unavailable.add(guild.id)
-                        log.error(
-                            "[%s] PyNaCl is not installed — cannot open a native voice connection. "
-                            "If this server uses Red's Audio (Lavalink), the bot rejoins voice "
-                            "automatically through that cog; auto-rejoin cannot reconnect "
-                            "independently without PyNaCl. Retries suppressed until cog reload.",
-                            guild.name,
-                        )
-                else:
-                    log.warning("[%s] RuntimeError joining %s: %s", guild.name, channel.name, exc)
+
             except asyncio.TimeoutError:
-                log.warning("[%s] Timed out while joining %s", guild.name, channel.name)
-            except discord.ClientException as exc:
-                log.warning("[%s] ClientException joining %s: %s", guild.name, channel.name, exc)
+                log.warning("[%s] Timed out while connecting/moving Lavalink player to %s", guild.name, channel.name)
             except Exception as exc:
-                log.exception("[%s] Unexpected error joining %s: %s", guild.name, channel.name, exc)
+                log.exception("[%s] Lavalink rejoin failed for %s: %s", guild.name, channel.name, exc)
             return False
 
     async def _ensure_in_channel(self, guild: discord.Guild):
-        """Check whether the bot is in the configured channel; rejoin if not."""
         cfg = self.config.guild(guild)
         if not await cfg.enabled():
             return
 
         channel_id: Optional[int] = await cfg.channel_id()
-        if channel_id is None:
+        channel = self._get_target_channel(guild, channel_id)
+        if channel is None:
+            if channel_id is not None:
+                log.warning("[%s] Configured channel %s not found or not a voice channel.", guild.name, channel_id)
             return
 
-        channel: Optional[discord.VoiceChannel] = guild.get_channel(channel_id)  # type: ignore
-        if channel is None or not isinstance(channel, discord.VoiceChannel):
-            log.warning("[%s] Configured channel %s not found or not a voice channel.", guild.name, channel_id)
+        player = self._get_ll_player(guild.id)
+        if player is None:
+            log.info("[%s] Lavalink player missing — rejoining %s", guild.name, channel.name)
+            await self._lavalink_connect(guild, channel)
             return
 
-        vc = guild.voice_client
-        if vc is None or not self._is_vc_connected(vc) or self._vc_channel_id(vc) != channel_id:
-            log.info("[%s] Not in target channel — rejoining %s", guild.name, channel.name)
-            await self._try_join(guild, channel)
+        current_channel_id = getattr(player, "channel_id", None)
+        is_connected = bool(getattr(player, "is_connected", False))
 
-    # ──────────────────────────────────────────
-    # Background watchdog
-    # ──────────────────────────────────────────
+        if (not is_connected) or (current_channel_id != channel.id):
+            log.info("[%s] Not in target channel via Lavalink — rejoining %s", guild.name, channel.name)
+            await self._lavalink_connect(guild, channel)
 
     async def _watchdog_loop(self):
         try:
@@ -174,10 +147,6 @@ class AutoRejoin(commands.Cog):
         if self._watchdog_task and not self._watchdog_task.done():
             self._watchdog_task.cancel()
 
-    # ──────────────────────────────────────────
-    # Discord event — instant rejoin
-    # ──────────────────────────────────────────
-
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -185,8 +154,7 @@ class AutoRejoin(commands.Cog):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ):
-        """Detect when the bot itself leaves a voice channel and rejoin at once."""
-        if member.id != self.bot.user.id:
+        if not self.bot.user or member.id != self.bot.user.id:
             return
 
         guild = member.guild
@@ -198,31 +166,24 @@ class AutoRejoin(commands.Cog):
         if channel_id is None:
             return
 
-        # Bot left or was moved away from the target channel
         was_in_target = before.channel is not None and before.channel.id == channel_id
         now_in_target = after.channel is not None and after.channel.id == channel_id
 
         if was_in_target and not now_in_target:
             log.info(
-                "[%s] Bot left target channel (before=%s, after=%s) — scheduling rejoin",
+                "[%s] Bot left target channel (before=%s, after=%s) — scheduling Lavalink rejoin",
                 guild.name,
-                before.channel,
-                after.channel,
+                getattr(before.channel, "name", None),
+                getattr(after.channel, "name", None),
             )
             await asyncio.sleep(REJOIN_DELAY)
             await self._ensure_in_channel(guild)
-
-    # ──────────────────────────────────────────
-    # Commands
-    # ──────────────────────────────────────────
 
     @commands.group(name="autorejoin", aliases=["arj"])
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def autorejoin(self, ctx: commands.Context):
-        """Auto-Rejoin Voice Channel — keep the bot locked to one voice channel."""
-
-    # ── setup ────────────────────────────────
+        """Auto-Rejoin Voice Channel using Lavalink."""
 
     @autorejoin.command(name="setup")
     async def autorejoin_setup(
@@ -230,69 +191,57 @@ class AutoRejoin(commands.Cog):
         ctx: commands.Context,
         channel: discord.VoiceChannel,
     ):
-        """Set the voice channel the bot should always stay in.
-
-        Example: `[p]autorejoin setup #general-voice`
-        """
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await ctx.send(
-            f"\u2705 Target voice channel set to **{channel.name}** (`{channel.id}`).\n"
+            f"✅ Target voice channel set to **{channel.name}** (`{channel.id}`).\n"
             f"Use `{ctx.clean_prefix}autorejoin enable` to activate auto-rejoin."
         )
 
-    # ── enable ───────────────────────────────
-
     @autorejoin.command(name="enable")
     async def autorejoin_enable(self, ctx: commands.Context):
-        """Enable auto-rejoin for this server."""
         cfg = self.config.guild(ctx.guild)
         channel_id: Optional[int] = await cfg.channel_id()
         if channel_id is None:
             await ctx.send(
-                f"\u26a0\ufe0f No voice channel configured yet. "
+                f"⚠️ No voice channel configured yet. "
                 f"Run `{ctx.clean_prefix}autorejoin setup <channel>` first."
             )
             return
 
-        channel: Optional[discord.VoiceChannel] = ctx.guild.get_channel(channel_id)  # type: ignore
-        if channel is None or not isinstance(channel, discord.VoiceChannel):
+        channel = self._get_target_channel(ctx.guild, channel_id)
+        if channel is None:
             await ctx.send(
-                "\u26a0\ufe0f The configured channel no longer exists. "
+                "⚠️ The configured channel no longer exists. "
                 f"Please run `{ctx.clean_prefix}autorejoin setup <channel>` again."
             )
             return
 
         await cfg.enabled.set(True)
-        await ctx.send(f"\u25b6\ufe0f Auto-rejoin **enabled** — joining **{channel.name}** now…")
-        ok = await self._try_join(ctx.guild, channel)
+        await ctx.send(f"▶️ Auto-rejoin **enabled** — joining **{channel.name}** through Lavalink now…")
+
+        ok = await self._lavalink_connect(ctx.guild, channel)
         if not ok:
             await ctx.send(
-                "\u26a0\ufe0f Could not connect right now. "
+                "⚠️ Could not connect through Lavalink right now. "
                 "The watchdog will keep retrying automatically."
             )
 
-    # ── disable ──────────────────────────────
-
     @autorejoin.command(name="disable")
     async def autorejoin_disable(self, ctx: commands.Context):
-        """Disable auto-rejoin for this server.
-
-        The bot will leave the voice channel and stop rejoining.
-        """
         cfg = self.config.guild(ctx.guild)
         await cfg.enabled.set(False)
 
-        vc: Optional[discord.VoiceClient] = ctx.guild.voice_client  # type: ignore
-        if vc is not None and vc.is_connected():
-            await vc.disconnect(force=False)
+        player = self._get_ll_player(ctx.guild.id)
+        if player is not None:
+            try:
+                await player.disconnect()
+            except Exception:
+                log.exception("[%s] Failed to disconnect Lavalink player", ctx.guild.name)
 
-        await ctx.send("\u23f9\ufe0f Auto-rejoin **disabled**. Bot has left the voice channel.")
-
-    # ── status ───────────────────────────────
+        await ctx.send("⏹️ Auto-rejoin **disabled**. Lavalink player has left the voice channel.")
 
     @autorejoin.command(name="status")
     async def autorejoin_status(self, ctx: commands.Context):
-        """Show the current auto-rejoin configuration for this server."""
         cfg = self.config.guild(ctx.guild)
         enabled: bool = await cfg.enabled()
         channel_id: Optional[int] = await cfg.channel_id()
@@ -302,13 +251,15 @@ class AutoRejoin(commands.Cog):
             ch = ctx.guild.get_channel(channel_id)
             channel_name = f"**{ch.name}** (`{channel_id}`)" if ch else f"*(deleted: `{channel_id}`)*"
 
-        vc: Optional[discord.VoiceClient] = ctx.guild.voice_client  # type: ignore
-        if vc and vc.is_connected():
-            in_channel = f"**{vc.channel.name}**"
+        player = self._get_ll_player(ctx.guild.id)
+        if player and getattr(player, "is_connected", False):
+            current_channel_id = getattr(player, "channel_id", None)
+            current_ch = ctx.guild.get_channel(current_channel_id) if current_channel_id else None
+            in_channel = f"**{current_ch.name}**" if current_ch else f"`{current_channel_id}`"
         else:
             in_channel = "*not connected*"
 
-        state = "\U0001f7e2 **ON**" if enabled else "\U0001f534 **OFF**"
+        state = "🟢 **ON**" if enabled else "🔴 **OFF**"
 
         embed = discord.Embed(
             title="Auto-Rejoin Status",
@@ -320,18 +271,19 @@ class AutoRejoin(commands.Cog):
         embed.set_footer(text=f"Check interval: every {CHECK_INTERVAL}s")
         await ctx.send(embed=embed)
 
-    # ── clear ────────────────────────────────
-
     @autorejoin.command(name="clear")
     async def autorejoin_clear(self, ctx: commands.Context):
-        """Clear the configured channel and disable auto-rejoin for this server."""
         cfg = self.config.guild(ctx.guild)
         was_enabled: bool = await cfg.enabled()
         await cfg.enabled.set(False)
         await cfg.channel_id.set(None)
 
-        vc: Optional[discord.VoiceClient] = ctx.guild.voice_client  # type: ignore
-        if was_enabled and vc is not None and vc.is_connected():
-            await vc.disconnect(force=False)
+        if was_enabled:
+            player = self._get_ll_player(ctx.guild.id)
+            if player is not None:
+                try:
+                    await player.disconnect()
+                except Exception:
+                    log.exception("[%s] Failed to disconnect Lavalink player", ctx.guild.name)
 
-        await ctx.send("\U0001f5d1\ufe0f Auto-rejoin configuration cleared.")
+        await ctx.send("🗑️ Auto-rejoin configuration cleared.")
