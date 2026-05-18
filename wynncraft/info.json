@@ -1,0 +1,22 @@
+{
+  "author": ["yunyun"],
+  "description": "Wynncraft API v3 utility cog for Red-DiscordBot. Provides commands for fetching player and guild information, leaderboards, and more.",
+  "install_msg": "Thanks for installing Wynncraft cog. Use `[p]load wynncraft`, then `[p]wynn`.",
+  "short": "Wynncraft API utility commands.",
+  "end_user_data_statement": "This cog stores optional Wynncraft API token globally and per-guild online watch settings. It does not store Wynncraft player secrets.",
+  "tags": [
+    "wynncraft",
+    "minecraft",
+    "mmorpg",
+    "api",
+    "guild",
+    "leaderboard"
+  ],
+  "requirements": [
+    "aiohttp"
+  ],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}
