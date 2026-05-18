@@ -1,0 +1,21 @@
+{
+    "author": ["yunyun"],
+    "name": "Grafana",
+    "short": "Render Grafana panels to Discord.",
+    "description": "Red-DiscordBot cog for rendering Grafana dashboard panels with configurable endpoint, token, variables, and time range.",
+    "install_msg": "Thanks for installing Grafana cog. Use `[p]grafana endpoint http://<grafana-host>:3000` then `[p]grafana panel_add <name> <uid> <panel_id>`.",
+    "requirements": [
+        "aiohttp"
+    ],
+    "tags": [
+        "grafana",
+        "monitoring",
+        "prometheus",
+        "dashboard",
+        "render"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
