@@ -1295,6 +1295,10 @@ class Wynncraft(commands.Cog):
                 )
 
         embed = self._embed("Wynncraft Watch by YunYun")
+        embed.description = "Live Wynncraft status board"
+
+        # Keep Online and Offline as separate Discord Embed fields.
+        # Do not put everything into embed.description, otherwise Discord will show it as one block.
         embed.add_field(
             name="🟢 Online",
             value=self._format_board_field(online_rows, "No online players."),
@@ -1305,6 +1309,7 @@ class Wynncraft(commands.Cog):
             value=self._format_board_field(offline_rows, "No offline players."),
             inline=False,
         )
+
         embed.set_footer(text=f"Auto refresh every {interval}s")
         embed.timestamp = discord.utils.utcnow()
         return embed
@@ -1362,8 +1367,13 @@ class Wynncraft(commands.Cog):
         )
 
     def _format_board_field(self, rows: List[str], empty_text: str) -> str:
+        """Format one Discord Embed field value.
+
+        Discord field values support Markdown, so player names can be bold.
+        Keep this below 1024 characters because Discord rejects oversized field values.
+        """
         text = "\n\n".join(rows) if rows else empty_text
-        return self._shorten(text, 1024)
+        return self._shorten(text, 1000)
 
     async def _get_player_profile(self, username_or_uuid: str, *, use_cache: bool) -> Any:
         return await self._request(
