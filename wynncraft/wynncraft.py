@@ -1285,40 +1285,30 @@ class Wynncraft(commands.Cog):
         return embed
 
     @staticmethod
-    def _box_text(value: Any, width: int = 34) -> str:
+    def _clean_board_text(value: Any, limit: int = 48) -> str:
         text = "N/A" if value is None else str(value)
         text = text.replace("\n", " ").replace("`", "'").strip()
-        if len(text) > width:
-            text = text[: max(0, width - 3)] + "..."
-        return text.ljust(width)
-
-    @classmethod
-    def _box_line(cls, value: Any) -> str:
-        return f"│ {cls._box_text(value)} │"
+        if len(text) > limit:
+            text = text[: max(0, limit - 3)] + "..."
+        return text
 
     @classmethod
     def _format_online_board_box(cls, name: str, server: str, highest_class: str) -> str:
-        border = "─" * 36
         return "\n".join(
             [
-                f"┌{border}┐",
-                cls._box_line(name),
-                cls._box_line("Status : Online"),
-                cls._box_line(f"Server : {server or 'N/A'}"),
-                cls._box_line(f"Highest: {highest_class or 'N/A'}"),
-                f"└{border}┘",
+                cls._clean_board_text(name),
+                "Status : Online",
+                f"Server : {cls._clean_board_text(server or 'N/A')}",
+                f"Highest: {cls._clean_board_text(highest_class or 'N/A')}",
             ]
         )
 
     @classmethod
     def _format_offline_board_box(cls, name: str) -> str:
-        border = "─" * 36
         return "\n".join(
             [
-                f"┌{border}┐",
-                cls._box_line(name),
-                cls._box_line("Status : Offline"),
-                f"└{border}┘",
+                cls._clean_board_text(name),
+                "Status : Offline",
             ]
         )
 
