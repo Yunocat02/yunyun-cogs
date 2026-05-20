@@ -1334,7 +1334,6 @@ class Wynncraft(commands.Cog):
         return "\n".join(
             [
                 cls._clean_board_text(name),
-                "Status : Online",
                 f"Server : {cls._clean_board_text(server or 'N/A')}",
                 f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
             ]
@@ -1345,7 +1344,6 @@ class Wynncraft(commands.Cog):
         return "\n".join(
             [
                 cls._clean_board_text(name),
-                "Status : Offline",
                 f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
                 f"Last Active: {cls._clean_board_text(last_active or 'Never', 64)}",
             ]
