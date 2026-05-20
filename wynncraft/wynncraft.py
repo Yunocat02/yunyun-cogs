@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -1359,7 +1359,8 @@ class Wynncraft(commands.Cog):
         if ts <= 0:
             return "Never"
 
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        thai_tz = timezone(timedelta(hours=7))
+        return datetime.fromtimestamp(ts, tz=thai_tz).strftime("%Y-%m-%d %H:%M")
 
     def _format_board_field(self, rows: List[str], empty_text: str) -> str:
         text = "\n\n".join(rows) if rows else empty_text
