@@ -105,6 +105,7 @@ class Wynncraft(commands.Cog):
             watch_interval=300,
             watch_mode="alert",
             watch_board_message_id=None,
+            watch_last_active={},
             last_watch_check_ts=0.0,
             last_online_state={},
         )
@@ -1201,12 +1202,19 @@ class Wynncraft(commands.Cog):
         interval: int,
         use_cache: bool,
     ) -> str:
+        last_active = await self.config.guild(guild).watch_last_active()
+        if not isinstance(last_active, dict):
+            last_active = {}
+
         embed = await self._build_watch_board_embed(
             players,
             visible_online_names,
             interval=interval,
             use_cache=use_cache,
+            last_active=last_active,
         )
+        await self.config.guild(guild).watch_last_active.set(last_active)
+
         message_id = await self.config.guild(guild).watch_board_message_id()
 
         try:
@@ -1240,6 +1248,7 @@ class Wynncraft(commands.Cog):
         *,
         interval: int,
         use_cache: bool,
+        last_active: Dict[str, Any],
     ) -> discord.Embed:
         online_rows: List[str] = []
         offline_rows: List[str] = []
@@ -1249,9 +1258,12 @@ class Wynncraft(commands.Cog):
             if not clean_name:
                 continue
 
-            if clean_name.lower() in visible_online_names:
+            key = clean_name.lower()
+
+            if key in visible_online_names:
                 server = "N/A"
                 highest_class = "N/A"
+                last_active[key] = time.time()
 
                 try:
                     profile = await self._get_player_profile(clean_name, use_cache=use_cache)
@@ -1268,6 +1280,7 @@ class Wynncraft(commands.Cog):
                 online_rows.append(self._format_online_board_box(clean_name, server, highest_class))
             else:
                 highest_class = "N/A"
+                last_active_text = self._format_last_active(last_active.get(key))
 
                 try:
                     highest_class = await self._get_highest_character_label(
@@ -1277,7 +1290,9 @@ class Wynncraft(commands.Cog):
                 except Exception:
                     log.exception("Failed to load offline watch class for username=%s", clean_name)
 
-                offline_rows.append(self._format_offline_board_box(clean_name, highest_class))
+                offline_rows.append(
+                    self._format_offline_board_box(clean_name, highest_class, last_active_text)
+                )
 
         embed = self._embed("Wynncraft Watch by YunYun")
         embed.add_field(
@@ -1302,17 +1317,28 @@ class Wynncraft(commands.Cog):
             text = text[: max(0, limit - 3)] + "..."
         return text
 
-    @classmethod
-    def _format_board_player_name(cls, name: str) -> str:
-        """Return a clean player name that can be safely bolded in Discord Markdown."""
-        clean_name = cls._clean_board_text(name, limit=64)
-        return discord.utils.escape_markdown(clean_name, as_needed=True)
+    @staticmethod
+    def _format_player_name(name: str) -> str:
+        clean_name = Wynncraft._clean_board_text(name, limit=48)
+        return f"**{discord.utils.escape_markdown(clean_name)}**"
+
+    @staticmethod
+    def _format_last_active(value: Any) -> str:
+        try:
+            ts = int(float(value))
+        except (TypeError, ValueError):
+            return "Not recorded yet"
+
+        if ts <= 0:
+            return "Not recorded yet"
+
+        return f"<t:{ts}:f> (<t:{ts}:R>)"
 
     @classmethod
     def _format_online_board_box(cls, name: str, server: str, highest_class: str) -> str:
         return "\n".join(
             [
-                f"**{cls._format_board_player_name(name)}**",
+                cls._format_player_name(name),
                 "Status : Online",
                 f"Server : {cls._clean_board_text(server or 'N/A')}",
                 f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
@@ -1320,18 +1346,24 @@ class Wynncraft(commands.Cog):
         )
 
     @classmethod
-    def _format_offline_board_box(cls, name: str, highest_class: str) -> str:
+    def _format_offline_board_box(
+        cls,
+        name: str,
+        highest_class: str,
+        last_active_text: str,
+    ) -> str:
         return "\n".join(
             [
-                f"**{cls._format_board_player_name(name)}**",
+                cls._format_player_name(name),
                 "Status : Offline",
                 f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
+                f"Last Active : {last_active_text}",
             ]
         )
 
     def _format_board_field(self, rows: List[str], empty_text: str) -> str:
         text = "\n\n".join(rows) if rows else empty_text
-        return self._shorten(text, 1008)
+        return self._shorten(text, 1024)
 
     async def _get_player_profile(self, username_or_uuid: str, *, use_cache: bool) -> Any:
         return await self._request(
