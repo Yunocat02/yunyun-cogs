@@ -1309,12 +1309,12 @@ class Wynncraft(commands.Cog):
         embed = self._embed("Wynncraft Watch by YunYun")
         embed.add_field(
             name="🟢 Online",
-            value=self._format_board_field(online_rows, "No online players."),
+            value=self._format_board_field(online_rows, "No watched players online."),
             inline=False,
         )
         embed.add_field(
             name="⚪ Offline",
-            value=self._format_board_field(offline_rows, "No offline players."),
+            value=self._format_board_field(offline_rows, "No watched players offline."),
             inline=False,
         )
         embed.set_footer(text=f"Auto refresh every {interval}s")
@@ -1331,23 +1331,25 @@ class Wynncraft(commands.Cog):
 
     @classmethod
     def _format_online_board_box(cls, name: str, server: str, highest_class: str) -> str:
+        # Use normal embed text instead of a code block/box to give Discord more horizontal space.
         return "\n".join(
             [
-                cls._clean_board_text(name),
-                "Status : Online",
-                f"Server : {cls._clean_board_text(server or 'N/A')}",
-                f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
+                f"**{cls._clean_board_text(name, 40)}**",
+                "Status: Online",
+                f"Server: {cls._clean_board_text(server or 'N/A', 32)}",
+                f"Class: {cls._clean_board_text(highest_class or 'N/A', 40)}",
             ]
         )
 
     @classmethod
     def _format_offline_board_box(cls, name: str, highest_class: str, last_active: str) -> str:
+        # Keep labels short so the board does not wrap easily on Discord.
         return "\n".join(
             [
-                cls._clean_board_text(name),
-                "Status : Offline",
-                f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
-                f"Last Active: {cls._clean_board_text(last_active or 'Never seen online', 64)}",
+                f"**{cls._clean_board_text(name, 40)}**",
+                "Status: Offline",
+                f"Class: {cls._clean_board_text(highest_class or 'N/A', 40)}",
+                f"Last: {cls._clean_board_text(last_active or 'Never seen online', 40)}",
             ]
         )
 
@@ -1361,11 +1363,12 @@ class Wynncraft(commands.Cog):
         if ts <= 0:
             return "Never seen online"
 
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %H:%M UTC")
 
     def _format_board_field(self, rows: List[str], empty_text: str) -> str:
         text = "\n\n".join(rows) if rows else empty_text
-        return f"```text\n{self._shorten(text, 1008)}\n```"
+        # Do not wrap the board in a code block; code blocks have inner padding and wrap sooner.
+        return self._shorten(text, 1024)
 
     async def _get_player_profile(self, username_or_uuid: str, *, use_cache: bool) -> Any:
         return await self._request(
