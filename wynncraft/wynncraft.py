@@ -103,6 +103,8 @@ class Wynncraft(commands.Cog):
             watch_channel_id=None,
             watch_players=[],
             watch_interval=300,
+            watch_mode="alert",
+            watch_board_message_id=None,
             last_watch_check_ts=0.0,
             last_online_state={},
         )
@@ -902,6 +904,8 @@ class Wynncraft(commands.Cog):
             f"`{p}wynnwatch remove <username>`\n"
             f"`{p}wynnwatch list`\n"
             f"`{p}wynnwatch interval <seconds>`\n"
+            f"`{p}wynnwatch mode <alert|board>`\n"
+            f"`{p}wynnwatch boardinit`\n"
             f"`{p}wynnwatch check`"
         )
 
@@ -982,6 +986,28 @@ class Wynncraft(commands.Cog):
         await self.config.guild(ctx.guild).watch_interval.set(seconds)
         await ctx.send(f"✅ Watch interval set to `{seconds}` seconds.")
 
+    @wynnwatch.command(name="mode")
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    async def watch_mode(self, ctx: commands.Context, mode: str):
+        """Set watch mode: alert sends messages, board edits one minimal embed."""
+        mode = mode.strip().lower()
+
+        if mode not in {"alert", "board"}:
+            return await ctx.send("⚠️ Mode must be `alert` or `board`.")
+
+        await self.config.guild(ctx.guild).watch_mode.set(mode)
+        await ctx.send(f"✅ Wynncraft watch mode set to `{mode}`.")
+
+    @wynnwatch.command(name="boardinit", aliases=["board", "initboard"])
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    async def watch_board_init(self, ctx: commands.Context):
+        """Create or refresh the Wynncraft Watch board message now."""
+        await self.config.guild(ctx.guild).watch_mode.set("board")
+        result = await self._run_watch_for_guild(ctx.guild, manual=True, force_board=True)
+        await ctx.send(result)
+
     @wynnwatch.command(name="list")
     @commands.guild_only()
     async def watch_list(self, ctx: commands.Context):
@@ -995,6 +1021,11 @@ class Wynncraft(commands.Cog):
         embed.add_field(
             name="Interval",
             value=f"{settings.get('watch_interval', 300)} seconds",
+            inline=True,
+        )
+        embed.add_field(
+            name="Mode",
+            value=str(settings.get("watch_mode") or "alert"),
             inline=True,
         )
         embed.add_field(
@@ -1082,6 +1113,7 @@ class Wynncraft(commands.Cog):
         *,
         visible_online_names: Optional[set[str]] = None,
         manual: bool = False,
+        force_board: bool = False,
     ) -> str:
         settings = await self.config.guild(guild).all()
 
@@ -1110,6 +1142,18 @@ class Wynncraft(commands.Cog):
         permissions = channel.permissions_for(me)
         if not permissions.send_messages:
             return "⚠️ I do not have permission to send messages in the watch channel."
+
+        watch_mode = str(settings.get("watch_mode") or "alert").lower()
+
+        if watch_mode == "board" or force_board:
+            return await self._update_watch_board(
+                guild,
+                channel,
+                players,
+                visible_online_names,
+                interval=int(settings.get("watch_interval") or 300),
+                use_cache=not manual,
+            )
 
         last_state = settings.get("last_online_state") or {}
         new_state = dict(last_state)
@@ -1146,6 +1190,181 @@ class Wynncraft(commands.Cog):
             )
 
         return f"Check complete. Sent {sent_count} alert(s)."
+
+    async def _update_watch_board(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        players: List[str],
+        visible_online_names: set[str],
+        *,
+        interval: int,
+        use_cache: bool,
+    ) -> str:
+        embed = await self._build_watch_board_embed(
+            players,
+            visible_online_names,
+            interval=interval,
+            use_cache=use_cache,
+        )
+        message_id = await self.config.guild(guild).watch_board_message_id()
+
+        try:
+            if message_id:
+                message = channel.get_partial_message(int(message_id))
+                await message.edit(embed=embed)
+                return "✅ Wynncraft Watch board updated."
+
+            message = await channel.send(embed=embed)
+            await self.config.guild(guild).watch_board_message_id.set(message.id)
+            return "✅ Wynncraft Watch board created."
+
+        except discord.NotFound:
+            message = await channel.send(embed=embed)
+            await self.config.guild(guild).watch_board_message_id.set(message.id)
+            return "✅ Wynncraft Watch board recreated."
+        except discord.Forbidden:
+            return "⚠️ I do not have permission to create or edit the watch board message."
+        except discord.HTTPException:
+            log.exception(
+                "Failed to update Wynncraft watch board. guild_id=%s channel_id=%s",
+                guild.id,
+                channel.id,
+            )
+            return "⚠️ Failed to update the watch board message."
+
+    async def _build_watch_board_embed(
+        self,
+        players: List[str],
+        visible_online_names: set[str],
+        *,
+        interval: int,
+        use_cache: bool,
+    ) -> discord.Embed:
+        online_rows: List[str] = []
+        offline_rows: List[str] = []
+
+        for username in players:
+            clean_name = username.strip()
+            if not clean_name:
+                continue
+
+            if clean_name.lower() in visible_online_names:
+                server = "N/A"
+                highest_class = "N/A"
+
+                try:
+                    profile = await self._get_player_profile(clean_name, use_cache=use_cache)
+                    if isinstance(profile, dict):
+                        server = str(profile.get("server") or "N/A")
+
+                    highest_class = await self._get_highest_character_label(
+                        clean_name,
+                        use_cache=use_cache,
+                    )
+                except Exception:
+                    log.exception("Failed to load online watch details for username=%s", clean_name)
+
+                online_rows.append(self._format_online_board_box(clean_name, server, highest_class))
+            else:
+                offline_rows.append(self._format_offline_board_box(clean_name))
+
+        embed = self._embed("Wynncraft Watch by YunYun")
+        embed.add_field(
+            name="🟢 Online",
+            value=self._format_board_field(online_rows, "No watched players online."),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚪ Offline",
+            value=self._format_board_field(offline_rows, "No watched players offline."),
+            inline=False,
+        )
+        embed.set_footer(text=f"Auto refresh every {interval}s")
+        embed.timestamp = discord.utils.utcnow()
+        return embed
+
+    @staticmethod
+    def _box_text(value: Any, width: int = 34) -> str:
+        text = "N/A" if value is None else str(value)
+        text = text.replace("\n", " ").replace("`", "'").strip()
+        if len(text) > width:
+            text = text[: max(0, width - 3)] + "..."
+        return text.ljust(width)
+
+    @classmethod
+    def _box_line(cls, value: Any) -> str:
+        return f"│ {cls._box_text(value)} │"
+
+    @classmethod
+    def _format_online_board_box(cls, name: str, server: str, highest_class: str) -> str:
+        border = "─" * 36
+        return "\n".join(
+            [
+                f"┌{border}┐",
+                cls._box_line(name),
+                cls._box_line("Status : Online"),
+                cls._box_line(f"Server : {server or 'N/A'}"),
+                cls._box_line(f"Highest: {highest_class or 'N/A'}"),
+                f"└{border}┘",
+            ]
+        )
+
+    @classmethod
+    def _format_offline_board_box(cls, name: str) -> str:
+        border = "─" * 36
+        return "\n".join(
+            [
+                f"┌{border}┐",
+                cls._box_line(name),
+                cls._box_line("Status : Offline"),
+                f"└{border}┘",
+            ]
+        )
+
+    def _format_board_field(self, rows: List[str], empty_text: str) -> str:
+        text = "\n\n".join(rows) if rows else empty_text
+        return f"```text\n{self._shorten(text, 1008)}\n```"
+
+    async def _get_player_profile(self, username_or_uuid: str, *, use_cache: bool) -> Any:
+        return await self._request(
+            f"/player/{quote(username_or_uuid, safe='')}",
+            ttl=self.TTL_PLAYER,
+            use_cache=use_cache,
+        )
+
+    async def _get_highest_character_label(self, username_or_uuid: str, *, use_cache: bool) -> str:
+        data = await self._request(
+            f"/player/{quote(username_or_uuid, safe='')}/characters",
+            ttl=self.TTL_PLAYER,
+            use_cache=use_cache,
+        )
+
+        if not isinstance(data, dict) or not data:
+            return "N/A"
+
+        best_label = "N/A"
+        best_level = -1
+
+        for char in data.values():
+            if not isinstance(char, dict):
+                continue
+
+            level = char.get("level")
+            if not isinstance(level, int):
+                try:
+                    level = int(level)
+                except (TypeError, ValueError):
+                    level = -1
+
+            if level > best_level:
+                ctype = str(char.get("type") or "UNKNOWN")
+                reskin = char.get("reskin")
+                label = f"{ctype}/{reskin}" if reskin else ctype
+                best_label = f"{label} Lv.{level}" if level >= 0 else label
+                best_level = level
+
+        return best_label
 
     async def _get_visible_online_names(self, *, use_cache: bool) -> set[str]:
         data = await self._request(
