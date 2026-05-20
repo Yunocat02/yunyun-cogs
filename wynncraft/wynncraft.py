@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -105,7 +106,7 @@ class Wynncraft(commands.Cog):
             watch_interval=300,
             watch_mode="alert",
             watch_board_message_id=None,
-            watch_last_active={},
+            watch_last_seen={},
             last_watch_check_ts=0.0,
             last_online_state={},
         )
@@ -1158,6 +1159,10 @@ class Wynncraft(commands.Cog):
 
         last_state = settings.get("last_online_state") or {}
         new_state = dict(last_state)
+        last_seen = settings.get("watch_last_seen") or {}
+        new_last_seen = dict(last_seen) if isinstance(last_seen, dict) else {}
+        now_ts = int(time.time())
+        last_seen_changed = False
         sent_count = 0
 
         for username in players:
@@ -1165,6 +1170,9 @@ class Wynncraft(commands.Cog):
             is_online = key in visible_online_names
             was_online = bool(last_state.get(key, False))
             new_state[key] = is_online
+            if is_online:
+                new_last_seen[key] = now_ts
+                last_seen_changed = True
 
             try:
                 if is_online and not was_online:
@@ -1182,6 +1190,8 @@ class Wynncraft(commands.Cog):
                 )
 
         await self.config.guild(guild).last_online_state.set(new_state)
+        if last_seen_changed:
+            await self.config.guild(guild).watch_last_seen.set(new_last_seen)
 
         if manual:
             online_watched = [p for p in players if p.lower() in visible_online_names]
@@ -1202,19 +1212,13 @@ class Wynncraft(commands.Cog):
         interval: int,
         use_cache: bool,
     ) -> str:
-        last_active = await self.config.guild(guild).watch_last_active()
-        if not isinstance(last_active, dict):
-            last_active = {}
-
         embed = await self._build_watch_board_embed(
+            guild,
             players,
             visible_online_names,
             interval=interval,
             use_cache=use_cache,
-            last_active=last_active,
         )
-        await self.config.guild(guild).watch_last_active.set(last_active)
-
         message_id = await self.config.guild(guild).watch_board_message_id()
 
         try:
@@ -1243,15 +1247,21 @@ class Wynncraft(commands.Cog):
 
     async def _build_watch_board_embed(
         self,
+        guild: discord.Guild,
         players: List[str],
         visible_online_names: set[str],
         *,
         interval: int,
         use_cache: bool,
-        last_active: Dict[str, Any],
     ) -> discord.Embed:
         online_rows: List[str] = []
         offline_rows: List[str] = []
+        last_seen = await self.config.guild(guild).watch_last_seen()
+        if not isinstance(last_seen, dict):
+            last_seen = {}
+        new_last_seen = dict(last_seen)
+        now_ts = int(time.time())
+        last_seen_changed = False
 
         for username in players:
             clean_name = username.strip()
@@ -1261,9 +1271,10 @@ class Wynncraft(commands.Cog):
             key = clean_name.lower()
 
             if key in visible_online_names:
+                new_last_seen[key] = now_ts
+                last_seen_changed = True
                 server = "N/A"
                 highest_class = "N/A"
-                last_active[key] = time.time()
 
                 try:
                     profile = await self._get_player_profile(clean_name, use_cache=use_cache)
@@ -1280,7 +1291,6 @@ class Wynncraft(commands.Cog):
                 online_rows.append(self._format_online_board_box(clean_name, server, highest_class))
             else:
                 highest_class = "N/A"
-                last_active_text = self._format_last_active(last_active.get(key))
 
                 try:
                     highest_class = await self._get_highest_character_label(
@@ -1290,15 +1300,13 @@ class Wynncraft(commands.Cog):
                 except Exception:
                     log.exception("Failed to load offline watch class for username=%s", clean_name)
 
-                offline_rows.append(
-                    self._format_offline_board_box(clean_name, highest_class, last_active_text)
-                )
+                last_active = self._format_last_seen(new_last_seen.get(key))
+                offline_rows.append(self._format_offline_board_box(clean_name, highest_class, last_active))
+
+        if last_seen_changed:
+            await self.config.guild(guild).watch_last_seen.set(new_last_seen)
 
         embed = self._embed("Wynncraft Watch by YunYun")
-        embed.description = "Live Wynncraft status board"
-
-        # Keep Online and Offline as separate Discord Embed fields.
-        # Do not put everything into embed.description, otherwise Discord will show it as one block.
         embed.add_field(
             name="🟢 Online",
             value=self._format_board_field(online_rows, "No online players."),
@@ -1309,7 +1317,6 @@ class Wynncraft(commands.Cog):
             value=self._format_board_field(offline_rows, "No offline players."),
             inline=False,
         )
-
         embed.set_footer(text=f"Auto refresh every {interval}s")
         embed.timestamp = discord.utils.utcnow()
         return embed
@@ -1322,28 +1329,11 @@ class Wynncraft(commands.Cog):
             text = text[: max(0, limit - 3)] + "..."
         return text
 
-    @staticmethod
-    def _format_player_name(name: str) -> str:
-        clean_name = Wynncraft._clean_board_text(name, limit=48)
-        return f"**{discord.utils.escape_markdown(clean_name)}**"
-
-    @staticmethod
-    def _format_last_active(value: Any) -> str:
-        try:
-            ts = int(float(value))
-        except (TypeError, ValueError):
-            return "Not recorded yet"
-
-        if ts <= 0:
-            return "Not recorded yet"
-
-        return f"<t:{ts}:f> (<t:{ts}:R>)"
-
     @classmethod
     def _format_online_board_box(cls, name: str, server: str, highest_class: str) -> str:
         return "\n".join(
             [
-                cls._format_player_name(name),
+                cls._clean_board_text(name),
                 "Status : Online",
                 f"Server : {cls._clean_board_text(server or 'N/A')}",
                 f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
@@ -1351,29 +1341,31 @@ class Wynncraft(commands.Cog):
         )
 
     @classmethod
-    def _format_offline_board_box(
-        cls,
-        name: str,
-        highest_class: str,
-        last_active_text: str,
-    ) -> str:
+    def _format_offline_board_box(cls, name: str, highest_class: str, last_active: str) -> str:
         return "\n".join(
             [
-                cls._format_player_name(name),
+                cls._clean_board_text(name),
                 "Status : Offline",
                 f"Class  : {cls._clean_board_text(highest_class or 'N/A')}",
-                f"Last Active : {last_active_text}",
+                f"Last Active: {cls._clean_board_text(last_active or 'Never seen online', 64)}",
             ]
         )
 
-    def _format_board_field(self, rows: List[str], empty_text: str) -> str:
-        """Format one Discord Embed field value.
+    @staticmethod
+    def _format_last_seen(value: Any) -> str:
+        try:
+            ts = int(float(value))
+        except (TypeError, ValueError):
+            return "Never seen online"
 
-        Discord field values support Markdown, so player names can be bold.
-        Keep this below 1024 characters because Discord rejects oversized field values.
-        """
+        if ts <= 0:
+            return "Never seen online"
+
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    def _format_board_field(self, rows: List[str], empty_text: str) -> str:
         text = "\n\n".join(rows) if rows else empty_text
-        return self._shorten(text, 1000)
+        return f"```text\n{self._shorten(text, 1008)}\n```"
 
     async def _get_player_profile(self, username_or_uuid: str, *, use_cache: bool) -> Any:
         return await self._request(
