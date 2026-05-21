@@ -1,7 +1,7 @@
 # yunyun-cogs
 Redbot cogs for **Red-DiscordBot** authored by **yunyun**.
 
-This repository provides a growing set of cogs designed for production use: clean UX, interactive components (dropdowns, buttons, modals), and practical workflows for real servers.
+This repository provides a growing set of cogs designed for production use.
 
 ---
 
